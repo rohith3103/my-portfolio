@@ -3,191 +3,167 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rohith Reddy Bethi - Portfolio</title>
+    <title>Rohith Reddy Bethi | Software Engineer</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- Google Fonts (Inter) -->
+    <!-- Inter Font -->
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
     
     <!-- Firebase Libraries -->
     <script type="module">
-        // Import the functions you need from the SDKs you need
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, setDoc, query, where, orderBy, limit, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, inMemoryPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, addDoc, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- Firebase & App Config ---
-        // These global variables are provided by the environment.
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // --- Firebase Configuration ---
+        let db, auth;
+        let currentUserId = null;
+        let isAuthReady = false;
+
+        // Use the __firebase_config global variable provided by the environment
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : { apiKey: "YOUR_FALLBACK_API_KEY", authDomain: "YOUR_FALLBACK_AUTH_DOMAIN", projectId: "YOUR_FALLBACK_PROJECT_ID" }; // Fallback for local testing
+
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        let db, auth, userId;
-        let tetrisLeaderboardUnsubscribe = null;
-        let currentPlayerName = "Player";
-        let isGameActive = false;
-        
-        // --- App Views & Modals ---
-        const portfolioView = document.getElementById('portfolio-view');
-        const gameView = document.getElementById('game-view');
-        const leaderboardView = document.getElementById('leaderboard-view');
-        const nameModal = document.getElementById('name-modal');
-        const gameOverModal = document.getElementById('game-over-modal');
-        const geminiHelperModal = document.getElementById('gemini-helper-modal');
+        try {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('Debug'); // Enable Firestore logging
 
-        // --- DOM Elements ---
-        const scoreElement = document.getElementById('game-score');
-        const levelElement = document.getElementById('game-level');
-        const linesElement = document.getElementById('game-lines');
-        const canvas = document.getElementById('tetris-canvas');
-        const context = canvas.getContext('2d');
-        const nextCanvas = document.getElementById('next-canvas');
-        const nextContext = nextCanvas.getContext('2d');
-        
-        // --- Navigation ---
-        
-        // Function to switch views
-        function showView(viewToShow) {
-            [portfolioView, gameView, leaderboardView].forEach(view => {
-                view.classList.add('hidden');
+            // Use inMemoryPersistence for this ephemeral environment
+            await setPersistence(auth, inMemoryPersistence);
+
+            console.log("Firebase Initialized.");
+
+            // Listen for auth state changes
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    // User is signed in
+                    currentUserId = user.uid;
+                    isAuthReady = true;
+                    console.log("User is authenticated with UID:", currentUserId);
+                    
+                    // Now that auth is ready, set up leaderboard listener
+                    setupLeaderboardListener();
+                } else {
+                    // User is signed out
+                    currentUserId = null;
+                    isAuthReady = false;
+                    console.log("User is not authenticated. Signing in...");
+                    
+                    // Sign in
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            console.log("Signing in with custom token...");
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            console.log("Signing in anonymously...");
+                            await signInAnonymously(auth);
+                        }
+                    } catch (authError) {
+                        console.error("Authentication error:", authError);
+                    }
+                }
             });
-            if (viewToShow) {
-                viewToShow.classList.remove('hidden');
-            }
-            window.scrollTo(0, 0); // Scroll to top on view change
+
+        } catch (e) {
+            console.error("Error initializing Firebase:", e);
         }
 
-        // Home link
-        document.getElementById('home-link').addEventListener('click', (e) => {
-            e.preventDefault();
-            if (isGameActive) {
-                pauseGame();
-            }
-            showView(portfolioView);
-            document.getElementById('back-to-game-btn').classList.add('hidden');
-        });
-
-        // "Play Tetris" buttons
-        [document.getElementById('game-nav-btn'), document.getElementById('game-nav-btn-mobile'), document.getElementById('game-project-btn')].forEach(btn => {
-            btn.addEventListener('click', () => {
-                showView(portfolioView); // Stay on portfolio view
-                nameModal.classList.remove('hidden'); // Show name modal
-                if (document.getElementById('mobile-menu').classList.contains('hidden') === false) {
-                    document.getElementById('mobile-menu').classList.add('hidden');
-                }
-            });
-        });
-
-        // Name Form
-        document.getElementById('name-form').addEventListener('submit', (e) => {
-            e.preventDefault();
-            currentPlayerName = document.getElementById('player-name').value.trim();
-            if (currentPlayerName) {
-                nameModal.classList.add('hidden');
-                showView(gameView);
-                document.getElementById('player-name-display').textContent = currentPlayerName;
-                startGame();
-            }
-        });
-
-        // Cancel Game from Name Modal
-        document.getElementById('cancel-game-btn').addEventListener('click', () => {
-            nameModal.classList.add('hidden');
-        });
-
-        // Leaderboard buttons
-        document.getElementById('view-leaderboard-btn').addEventListener('click', () => {
-            if (isGameActive) {
-                pauseGame();
-            }
-            showView(leaderboardView);
-            document.getElementById('back-to-game-btn').classList.remove('hidden');
-            fetchLeaderboard();
-        });
-
-        document.getElementById('leaderboard-from-gameover-btn').addEventListener('click', () => {
-            gameOverModal.classList.add('hidden');
-            showView(leaderboardView);
-            document.getElementById('back-to-game-btn').classList.add('hidden'); // Can't go back to game
-            fetchLeaderboard();
-        });
-
-        // Back buttons
-        [document.getElementById('back-to-portfolio-btn'), document.getElementById('back-to-portfolio-btn-2')].forEach(btn => {
-            btn.addEventListener('click', () => {
-                if (isGameActive) {
-                    pauseGame();
-                }
-                showView(portfolioView);
-                document.getElementById('back-to-game-btn').classList.add('hidden');
-            });
-        });
+        // --- Leaderboard Logic ---
+        const leaderboardList = document.getElementById('leaderboard-list');
+        const leader1 = document.getElementById('leader-1');
+        const leader2 = document.getElementById('leader-2');
+        const leader3 = document.getElementById('leader-3');
+        const leaderboardLoading = document.getElementById('leaderboard-loading');
         
-        document.getElementById('back-to-game-btn').addEventListener('click', () => {
-            showView(gameView);
-            // Don't auto-resume, let user do it
-        });
+        const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris-leaderboard`;
 
-        // Play Again
-        document.getElementById('play-again-btn').addEventListener('click', () => {
-            gameOverModal.classList.add('hidden');
-            startGame(); // This will reset and start the game
-        });
-        
-        // --- Firebase Init & Auth ---
-        async function initializeFirebase() {
+        async function saveScore(name, score) {
+            if (!isAuthReady || !db) {
+                console.error("Auth not ready or Firestore not initialized. Cannot save score.");
+                return;
+            }
+            if (score <= 0) {
+                console.log("Score is 0, not saving.");
+                return;
+            }
             try {
-                if (!firebaseConfig.apiKey) {
-                    console.log("Firebase config not found. Using anonymous auth for demo.");
-                    return;
-                }
-                
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                // Enable Firestore logging for debugging
-                // setLogLevel('debug');
+                const docRef = await addDoc(collection(db, leaderboardCollectionPath), {
+                    name: name,
+                    score: score,
+                    timestamp: new Date()
+                });
+                console.log("Score saved with ID: ", docRef.id);
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        }
 
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        // console.log("User is signed in with UID:", userId);
-                        // User is authenticated, now we can safely attach leaderboard listener
-                        attachLeaderboardListener();
-                    } else {
-                        userId = null;
-                        // console.log("User is signed out.");
-                        // Detach listener if user signs out
-                        if (tetrisLeaderboardUnsubscribe) {
-                            tetrisLeaderboardUnsubscribe();
-                            tetrisLeaderboardUnsubscribe = null;
-                        }
+        function setupLeaderboardListener() {
+            if (!db) {
+                console.error("Firestore not initialized. Cannot set up listener.");
+                return;
+            }
+            
+            const q = query(collection(db, leaderboardCollectionPath));
+            
+            onSnapshot(q, (querySnapshot) => {
+                const scores = [];
+                querySnapshot.forEach((doc) => {
+                    scores.push(doc.data());
+                });
+
+                // Sort scores descending
+                scores.sort((a, b) => b.score - a.score);
+
+                // Clear old list
+                if (leaderboardList) leaderboardList.innerHTML = '';
+                if (leaderboardLoading) leaderboardLoading.classList.add('hidden');
+
+                // Update Top 3
+                const top3 = [leader1, leader2, leader3];
+                top3.forEach((el, index) => {
+                    if (el && scores[index]) {
+                        el.querySelector('.text-xl, .text-2xl').textContent = scores[index].name;
+                        el.querySelector('.text-lg, .text-xl').textContent = scores[index].score;
+                    } else if (el) {
+                        el.querySelector('.text-xl, .text-2xl').textContent = '...';
+                        el.querySelector('.text-lg, .text-xl').textContent = '...';
                     }
                 });
 
-                // Sign in
-                if (initialAuthToken) {
-                    // console.log("Signing in with custom token...");
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    // console.log("No custom token, signing in anonymously...");
-                    await signInAnonymously(auth);
-                }
+                // Update full list (ranks 4+)
+                scores.slice(3).forEach((entry, index) => {
+                    const rank = index + 4;
+                    const li = document.createElement('li');
+                    li.className = "flex justify-between items-center p-4 bg-gray-700 rounded-lg";
+                    li.innerHTML = `
+                        <div class="flex items-center">
+                            <span class="text-gray-400 font-bold w-6 text-center mr-3">${rank}</span>
+                            <span class="text-white font-medium truncate">${entry.name}</span>
+                        </div>
+                        <span class="text-blue-400 font-bold">${entry.score}</span>
+                    `;
+                    if (leaderboardList) leaderboardList.appendChild(li);
+                });
 
-            } catch (error) {
-                console.error("Firebase Initialization Error:", error);
-                // Handle error, maybe show a message to the user
-            }
+            }, (error) => {
+                console.error("Error getting leaderboard: ", error);
+                if (leaderboardLoading) leaderboardLoading.textContent = "Error loading scores.";
+            });
         }
         
-        // Call initialization
-        initializeFirebase();
+        // Expose saveScore to global scope so game can call it
+        window.saveScore = saveScore;
 
-        // --- Custom Styles ---
     </script>
+    
     <style>
         body {
             font-family: 'Inter', sans-serif;
@@ -213,29 +189,29 @@
 
         /* For the project carousel */
         .project-carousel {
-            display: flex;
-            overflow-x: auto;
-            scroll-snap-type: x mandatory;
+            scroll-behavior: smooth;
             -webkit-overflow-scrolling: touch;
-            scrollbar-width: none; /* Firefox */
         }
         .project-carousel::-webkit-scrollbar {
-            display: none; /* Safari/Chrome */
+            height: 6px;
+        }
+        .project-carousel::-webkit-scrollbar-thumb {
+            background: #374151; /* Gray 700 */
+            border-radius: 3px;
         }
         .project-carousel-item {
             flex: 0 0 auto;
+            scroll-snap-align: start;
             width: 90%;
-            scroll-snap-align: center;
-            margin-right: 1rem;
         }
         @media (min-width: 768px) {
             .project-carousel-item {
-                width: 45%;
+                width: calc(50% - 0.75rem); /* 2 items with gap */
             }
         }
         @media (min-width: 1024px) {
             .project-carousel-item {
-                width: 30%;
+                width: calc(33.333% - 1rem); /* 3 items with gap */
             }
         }
         
@@ -265,7 +241,7 @@
             opacity: 1;
             transform: translateY(0);
         }
-        
+
         /* Tetris Canvas */
         #tetris-canvas {
             background: #171717; /* Dark gray background */
@@ -328,6 +304,24 @@
             }
         }
 
+        @keyframes rotation {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Mobile Game Controls */
+        #mobile-controls {
+            touch-action: manipulation; /* Prevents zoom on double tap */
+        }
+        #mobile-controls button {
+            user-select: none; /* Prevent text selection */
+            -webkit-tap-highlight-color: transparent; /* Remove tap highlight */
+        }
+
     </style>
 </head>
 <body class="antialiased">
@@ -339,7 +333,7 @@
     <header class="bg-gray-900/80 backdrop-blur-md fixed top-0 left-0 right-0 z-50 border-b border-gray-700">
         <nav class="container mx-auto px-6 py-4 flex justify-between items-center">
             <a href="#" id="home-link" class="text-2xl font-bold text-white">
-                Rohith <span class="text-blue-500">Reddy</span>
+                Rohith <span class="text-blue-500">Bethi</span>
             </a>
             <div class="hidden md:flex space-x-6">
                 <a href="#about" class="nav-link text-gray-300 hover:text-blue-400 transition-colors duration-300">About</a>
@@ -371,7 +365,7 @@
         </div>
     </header>
 
-    <!-- =========== Main Portfolio View =========== -->
+    <!-- Main Content Area -->
     <div id="portfolio-view">
         <main class="container mx-auto px-6 pt-24 md:pt-32">
 
@@ -379,20 +373,20 @@
             <section id="hero" class="flex flex-col-reverse md:flex-row items-center justify-between min-h-[70vh] gap-8">
                 <div class="md:w-3/5 text-center md:text-left">
                     <h1 class="text-4xl md:text-6xl font-extrabold text-white leading-tight mb-4">
-                        Hi, I'm <span class="text-blue-500">Rohith Reddy</span>
+                        Hi, I'm <span class="text-blue-500">Rohith Reddy Bethi</span>
                     </h1>
                     <div class="text-2xl md:text-3xl font-semibold text-gray-300 mb-6 h-10">
                         <span id="typing-text" class="typing-cursor"></span>
                     </div>
-                    <p class="text-lg text-gray-400 mb-8 max-w-xl mx-auto md:mx-0">
-                        Software Engineer specializing in architecting and deploying robust, AI-driven applications. Strong foundation in Data Structures, Algorithms, and OOP using Python and Java.
+                    <p class="text-lg md:text-xl text-gray-400 max-w-xl mx-auto md:mx-0 mb-8">
+                        A Software Engineer specializing in building intelligent, scalable applications with a passion for AI, ML, and robust backend systems.
                     </p>
                     <div class="flex justify-center md:justify-start space-x-4">
                         <a href="#projects" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all duration-300 text-lg">
                             View My Work
                         </a>
-                        <a href="https://linkedin.com/in/rohithreddy3103" target="_blank" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all duration-300 text-lg">
-                            LinkedIn
+                        <a href="#contact" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                            Get In Touch
                         </a>
                     </div>
                 </div>
@@ -400,7 +394,7 @@
                     <img src="https://placehold.co/400x400/1f2937/3b82f6?text=RRB" 
                          alt="Portrait of Rohith Reddy Bethi" 
                          class="rounded-full w-64 h-64 md:w-96 md:h-96 object-cover border-8 border-gray-800 shadow-2xl"
-                         onerror="this.src='https.placehold.co/400x400/1f2937/3b82f6?text=RRB'; this.onerror=null;">
+                         onerror="this.src='https://placehold.co/400x400/1f2937/3b82f6?text=RRB'; this.onerror=null;">
                 </div>
             </section>
 
@@ -410,20 +404,20 @@
                     <h2 class="text-3xl md:text-4xl font-bold text-white">About <span class="text-blue-500">Me</span></h2>
                     <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
                 </div>
-                <div class="flex flex-col md:flex-row items-start gap-12 bg-gray-800/60 p-8 md:p-12 rounded-2xl shadow-xl border border-gray-700">
-                    <div class="md:w-1/2 text-center md:text-left">
-                        <h3 class="text-2xl font-bold text-white mb-4">Who I Am</h3>
+                <div class="flex flex-col md:flex-row items-start gap-12 bg-gray-800/60 p-8 rounded-2xl shadow-xl border border-gray-700">
+                    <div class="md:w-1/2 w-full">
+                        <h3 class="text-2xl font-bold text-white mb-4 text-center md:text-left">Who I Am</h3>
                         <p class="text-gray-300 text-lg leading-relaxed mb-6">
                             I'm a Software Engineer with a dual expertise in software engineering and machine learning. I thrive on building scalable, intelligent solutions to complex problems, with a strong background in backend frameworks like Flask and leading AI/ML frameworks like PyTorch and TensorFlow.
                         </p>
                     </div>
                     <div class="md:w-1/2 w-full">
                         <h3 class="text-2xl font-bold text-white mb-4 text-center md:text-left">Education</h3>
-                        <div class="bg-gray-900/50 p-6 rounded-lg border border-gray-700">
-                            <h4 class="text-xl font-semibold text-blue-400">Bachelor of Technology, CSE (Data Science)</h4>
-                            <p class="text-gray-300 font-medium mt-1">Anurag University, Hyderabad</p>
-                            <p class="text-gray-400 text-sm mt-1">Oct 2021 - Jul 2025</p>
-                            <p class="text-gray-400 text-sm mt-2">GPA: 7.23</p>
+                        <div class="bg-gray-800 p-6 rounded-lg border border-gray-700">
+                            <h4 class="text-xl font-semibold text-white">B.Tech, Computer Science (Data Science)</h4>
+                            <p class="text-blue-400 font-medium mb-1">Anurag University, Hyderabad</p>
+                            <p class="text-gray-400 text-sm">Oct 2021 - July 2025</p>
+                            <p class="text-gray-300 mt-2">GPA: 7.23</p>
                         </div>
                     </div>
                 </div>
@@ -530,7 +524,7 @@
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">ChromaDB</span>
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Whisper</span>
                                     </div>
-                                    <a href="https://github.com/rohith3103/coastal-seven-multimodal-project.git" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
+                                    <a href="https://github.com/rohith3103/coastal-seven-multimodal-project" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
                                 </div>
                             </div>
                         </div>
@@ -550,12 +544,12 @@
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Deep Learning</span>
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Transformer</span>
                                     </div>
-                                    <a href="#" target="_blank" class="text-gray-500 font-medium inline-flex items-center mt-auto cursor-not-allowed">GitHub Link (Private) &rarr;</a>
+                                    <a href="#" class="text-gray-500 font-medium inline-flex items-center mt-auto cursor-not-allowed">GitHub Link (Private) &rarr;</a>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Project Card 2: DeepFake Detection -->
+                        <!-- Project Card 3: DeepFake Detection -->
                         <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
                             <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
                                 <img src="https://placehold.co/600x400/1f2937/3b82f6?text=DeepFake+Detection" 
@@ -575,7 +569,7 @@
                             </div>
                         </div>
 
-                        <!-- Project Card 3: AI-Powered Medical Imaging -->
+                        <!-- Project Card 4: AI-Powered Medical Imaging -->
                         <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
                             <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
                                 <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Medical+Imaging+AI" 
@@ -594,15 +588,15 @@
                             </div>
                         </div>
 
-                        <!-- Project Card 3: E-commerce API -->
+                        <!-- Project Card 5: E-commerce API -->
                         <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
                             <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
                                 <img src="https://placehold.co/600x400/1f2937/3b82f6?text=E-Commerce+API" 
                                      alt="E-commerce API" class="w-full h-48 object-cover"
-                                     onerror="this.src='https.placehold.co/600x400/1f2937/3b82f6?text=E-Commerce+API'; this.onerror=null;">
+                                     onerror="this.src='httpsias.placehold.co/600x400/1f2937/3b82f6?text=E-Commerce+API'; this.onerror=null;">
                                 <div class="p-6 flex flex-col flex-grow">
                                     <h3 class="text-xl font-bold text-white mb-2">E-commerce Product & Order API</h3>
-                                    <p class="text-gray-400 mb-4 flex-grow">Scalable backend REST API service built with Java and Spring Boot to manage product inventory and user orders, using MongoDB.</p>
+                                    <p class="text-gray-400 mb-4 flex-grow">A scalable backend REST API service in Java and Spring Boot to manage product inventory and user orders.</p>
                                     <div class="flex flex-wrap gap-2 mb-4">
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Java</span>
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Spring Boot</span>
@@ -610,25 +604,6 @@
                                         <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">REST API</span>
                                     </div>
                                     <a href="https://github.com/rohith3103/flipkart-api" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Project Card 4: My Tetris Game -->
-                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
-                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
-                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Tetris+Game" 
-                                     alt="Tetris Game Screenshot" class="w-full h-48 object-cover"
-                                     onerror="this.src='https.placehold.co/600x400/1f2937/3b82f6?text=Tetris+Game'; this.onerror=null;">
-                                <div class="p-6 flex flex-col flex-grow">
-                                    <h3 class="text-xl font-bold text-white mb-2">My Tetris Game</h3>
-                                    <p class="text-gray-400 mb-4 flex-grow">The very game on this site! Built with plain JavaScript, HTML Canvas, and a real-time Firestore leaderboard.</p>
-                                    <div class="flex flex-wrap gap-2 mb-4">
-                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">JavaScript</span>
-                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">HTML Canvas</span>
-                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Firestore</span>
-                                    </div>
-                                    <button id="game-project-btn" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">Play Game &rarr;</button>
                                 </div>
                             </div>
                         </div>
@@ -641,7 +616,7 @@
             <section id="contact" class="py-24 fade-in-section">
                 <div class="text-center mb-12">
                     <h2 class="text-3xl md:text-4xl font-bold text-white">Get In <span class="text-blue-500">Touch</span></h2>
-                    <p class="text-lg text-gray-400 mt-4 max-w-2xl mx-auto">I'm currently open to new opportunities. Feel free to send me a message.</p>
+                    <p class="text-lg text-gray-400 mt-4 max-w-2xl mx-auto">I'm currently available for freelance work and open to new opportunities. Feel free to send me a message.</p>
                     <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
                 </div>
                 
@@ -662,7 +637,7 @@
                                 <label for="message" class="block text-sm font-medium text-gray-300">Message</label>
                                 <button type="button" id="gemini-helper-btn" class="text-xs text-blue-400 hover:text-blue-300 font-semibold">✨ Help Me Write</button>
                             </div>
-                            <textarea id="message" name="message" rows="5" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Hi Rohith, I'd like to connect about..." required></textarea>
+                            <textarea id="message" name="message" rows="5" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></textarea>
                         </div>
                         <div class="text-center">
                             <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
@@ -681,7 +656,6 @@
         <footer class="bg-gray-900 border-t border-gray-700 mt-24">
             <div class="container mx-auto px-6 py-8 text-center text-gray-400">
                 <p>&copy; <span id="current-year"></span> Rohith Reddy Bethi. All rights reserved.</p>
-                <p class="text-sm mt-1">Contact: <a href="mailto:rohithreddy3103@gmail.com" class="text-blue-400 hover:underline">rohithreddy3103@gmail.com</a></p>
             </div>
         </footer>
     </div>
@@ -709,7 +683,7 @@
             <h2 class="text-xl font-bold text-white text-center mb-4">✨ Message Helper</h2>
             <p class="text-gray-400 text-center text-sm mb-6">Enter a few keywords, and Gemini will draft a message for you.</p>
             <form id="gemini-helper-form">
-                <label for="gemini-keywords" class="block text-sm font-medium text-gray-300 mb-2">Keywords (e.g., "job, AI, available")</label>
+                <label for="gemini-keywords" class="block text-sm font-medium text-gray-300 mb-2">Keywords (e.g., "job, react, available")</label>
                 <input type="text" id="gemini-keywords" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required>
                 <button type="submit" id="generate-draft-btn" class="mt-6 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
                     Generate Draft
@@ -718,14 +692,9 @@
                     Cancel
                 </button>
             </form>
-            <div id="gemini-loading" class="hidden mt-6 text-center">
-                <div class="spinner mx-auto"></div>
-                <p class="text-gray-400 mt-2">Generating...</p>
-            </div>
         </div>
     </div>
-
-
+    
     <!-- =========== Game View =========== -->
     <div id="game-view" class="hidden pt-24 min-h-screen">
         <div class="container mx-auto px-4 text-center">
@@ -745,7 +714,7 @@
                     <div class="space-y-3">
                         <div>
                             <span class="text-gray-400">Player:</span>
-                            <span id="player-name-display" class="text-blue-400 font-bold text-lg ml-2 truncate">...</span>
+                            <span id="game-player-name" class="text-blue-500 font-bold text-lg ml-2 truncate"></span>
                         </div>
                         <div>
                             <span class="text-gray-400">Score:</span>
@@ -796,7 +765,7 @@
                 <!-- Main Game Canvas -->
                 <div class="relative">
                     <canvas id="tetris-canvas" width="300" height="600"></canvas>
-                    <div id="pause-overlay" class="hidden absolute inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center rounded-lg">
+                    <div id="pause-overlay" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center rounded-lg">
                         <h2 class="text-4xl font-bold text-white">Paused</h2>
                     </div>
                 </div>
@@ -811,12 +780,9 @@
                         <!-- Gemini Motivation Area -->
                         <div id="motivation-area" class="my-4 p-3 bg-gray-700 rounded-lg min-h-[60px] flex items-center justify-center hidden">
                             <p id="motivation-text" class="text-gray-300 italic"></p>
-                            <div id="motivation-loading" class="hidden">
-                                <div class="spinner mx-auto" style="width: 32px; height: 32px; border-width: 3px;"></div>
-                            </div>
                         </div>
                         
-                        <button id="get-motivation-btn" class="w-full bg-blue-600/50 hover:bg-blue-600 text-white font-medium py-2 px-6 rounded-lg shadow-lg transition-all duration-300 text-sm mb-4">
+                        <button id="get-motivation-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300 mb-3">
                             ✨ Get Motivation
                         </button>
                         
@@ -828,10 +794,44 @@
                         </button>
                     </div>
                 </div>
+
             </div>
+
+            <!-- Mobile Game Controls (Hidden on md and up) -->
+            <div id="mobile-controls" class="md:hidden grid grid-cols-3 gap-3 mt-6 p-4 bg-gray-800/80 rounded-xl max-w-sm mx-auto">
+                <!-- Row 1: Rotate -->
+                <div class="col-span-3 flex justify-center">
+                    <button id="mobile-rotate" class="bg-blue-600 active:bg-blue-700 text-white font-bold rounded-lg p-5 w-24 h-16 flex items-center justify-center shadow-lg">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m-15.357-2a8.001 8.001 0 0015.357 2m0 0H15"></path></svg>
+                    </button>
+                </div>
+                <!-- Row 2: Left, Right -->
+                <div class="flex justify-start">
+                    <button id="mobile-left" class="bg-gray-600 active:bg-gray-700 text-white font-bold rounded-lg p-5 w-24 h-16 flex items-center justify-center shadow-lg">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    </button>
+                </div>
+                <div class="flex justify-center">
+                    <button id="mobile-soft-drop" class="bg-gray-600 active:bg-gray-700 text-white font-bold rounded-lg p-5 w-24 h-16 flex items-center justify-center shadow-lg">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 17l-4 4m0 0l-4-4m4 4V3"></path></svg>
+                    </button>
+                </div>
+                <div class="flex justify-end">
+                    <button id="mobile-right" class="bg-gray-600 active:bg-gray-700 text-white font-bold rounded-lg p-5 w-24 h-16 flex items-center justify-center shadow-lg">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+                    </button>
+                </div>
+                <!-- Row 3: Hard Drop -->
+                <div class="col-span-3 flex justify-center">
+                    <button id="mobile-hard-drop" class="bg-red-600 active:bg-red-700 text-white font-bold rounded-lg p-5 w-full h-16 flex items-center justify-center shadow-lg">
+                        HARD DROP
+                    </button>
+                </div>
+            </div>
+
         </div>
     </div>
-
+    
     <!-- =========== Leaderboard View =========== -->
     <div id="leaderboard-view" class="hidden pt-24 min-h-screen">
         <div class="container mx-auto px-4">
@@ -870,92 +870,155 @@
                 </div>
 
                 <!-- Full List -->
-                <div id="leaderboard-list-loading" class="text-center">
-                    <div class="spinner mx-auto"></div>
-                </div>
+                <div id="leaderboard-loading" class="text-center text-gray-400">Loading scores...</div>
                 <ul id="leaderboard-list" class="space-y-3">
-                    <!-- Ranks 4-10 will be dynamically inserted here -->
+                    <!-- Scores 4+ loaded here -->
                 </ul>
             </div>
         </div>
     </div>
 
 
-    <script type_BROKEN="module">
-    // This is intentionally broken to prevent execution in the <head>
-    // All JS logic is moved into the main <script type="module"> block above.
-    </script>
-    
+    <!-- Main Application Script -->
     <script>
-    // --- Non-Module, Standard JS ---
-
     document.addEventListener('DOMContentLoaded', () => {
+
+        // --- View Switching Logic ---
+        const portfolioView = document.getElementById('portfolio-view');
+        const gameView = document.getElementById('game-view');
+        const leaderboardView = document.getElementById('leaderboard-view');
+        const nameModal = document.getElementById('name-modal');
+        const gameOverModal = document.getElementById('game-over-modal');
+        const geminiHelperModal = document.getElementById('gemini-helper-modal');
+        const backToGameBtn = document.getElementById('back-to-game-btn');
         
-        // --- Mobile Menu Toggle ---
+        const allViews = [portfolioView, gameView, leaderboardView, nameModal, gameOverModal, geminiHelperModal];
+        
+        function showView(viewToShow) {
+            allViews.forEach(v => v.classList.add('hidden'));
+            if (viewToShow) viewToShow.classList.remove('hidden');
+            window.scrollTo(0, 0);
+        }
+
+        // --- Navigation Listeners ---
+        const gameNavBtn = document.getElementById('game-nav-btn');
+        const gameNavBtnMobile = document.getElementById('game-nav-btn-mobile');
+        const gameProjectBtn = document.getElementById('game-project-btn');
+        const backToPortfolioBtn = document.getElementById('back-to-portfolio-btn');
+        const backToPortfolioBtn2 = document.getElementById('back-to-portfolio-btn-2');
+        const viewLeaderboardBtn = document.getElementById('view-leaderboard-btn');
+        const leaderboardFromGameOverBtn = document.getElementById('leaderboard-from-gameover-btn');
+        const backToGameBtnEl = document.getElementById('back-to-game-btn');
+        const homeLink = document.getElementById('home-link');
+
+        function openGameModal() {
+            nameModal.classList.remove('hidden');
+            // Check if game is paused, if so, resume it to show the modal properly
+            if (gamePaused) {
+                pauseGame(); // Toggle pause off
+            }
+        }
+        gameNavBtn.addEventListener('click', openGameModal);
+        gameNavBtnMobile.addEventListener('click', openGameModal);
+        // gameProjectBtn.addEventListener('click', openGameModal); // Removed, project link now goes to github
+
+        function goToPortfolio() {
+            showView(portfolioView);
+            backToGameBtn.classList.add('hidden');
+            if (gameRunning) {
+                pauseGame();
+            }
+        }
+        homeLink.addEventListener('click', (e) => {
+            e.preventDefault();
+            goToPortfolio();
+            window.location.hash = ''; // Clear hash
+        });
+        backToPortfolioBtn.addEventListener('click', goToPortfolio);
+        backToPortfolioBtn2.addEventListener('click', goToPortfolio);
+
+        viewLeaderboardBtn.addEventListener('click', () => {
+            showView(leaderboardView);
+            backToGameBtn.classList.remove('hidden');
+        });
+
+        leaderboardFromGameOverBtn.addEventListener('click', () => {
+            showView(leaderboardView);
+            backToGameBtn.classList.add('hidden'); // Can't go back to a finished game
+        });
+        
+        backToGameBtnEl.addEventListener('click', () => {
+            showView(gameView);
+        });
+
+        // --- Mobile Menu ---
         const mobileMenuBtn = document.getElementById('mobile-menu-btn');
         const mobileMenu = document.getElementById('mobile-menu');
         mobileMenuBtn.addEventListener('click', () => {
             mobileMenu.classList.toggle('hidden');
         });
-
-        // Close mobile menu when a nav link is clicked
-        document.querySelectorAll('#mobile-menu .nav-link, #game-nav-btn-mobile').forEach(link => {
-            link.addEventListener('click', () => {
+        
+        // Close mobile menu when a link is clicked
+        document.querySelectorAll('#mobile-menu .nav-link, #mobile-menu button').forEach(item => {
+            item.addEventListener('click', () => {
                 mobileMenu.classList.add('hidden');
             });
         });
-
-        // --- Typing Animation ---
-        const typingTextElement = document.getElementById('typing-text');
-        if (typingTextElement) {
-            const roles = ["Software Engineer", "AI & ML Developer", "Data Scientist", "Backend Developer"];
-            let roleIndex = 0;
-            let charIndex = 0;
-            let isDeleting = false;
-            
-            function type() {
-                const currentRole = roles[roleIndex];
-                if (isDeleting) {
-                    // Deleting
-                    typingTextElement.textContent = currentRole.substring(0, charIndex - 1);
-                    charIndex--;
-                    if (charIndex === 0) {
-                        isDeleting = false;
-                        roleIndex = (roleIndex + 1) % roles.length;
-                        setTimeout(type, 500); // Pause before typing new role
-                    } else {
-                        setTimeout(type, 50); // Deleting speed
-                    }
-                } else {
-                    // Typing
-                    typingTextElement.textContent = currentRole.substring(0, charIndex + 1);
-                    charIndex++;
-                    if (charIndex === currentRole.length) {
-                        isDeleting = true;
-                        setTimeout(type, 2000); // Pause at end of word
-                    } else {
-                        setTimeout(type, 100); // Typing speed
-                    }
-                }
-            }
-            type();
-        }
 
         // --- Smooth Scrolling for Nav Links ---
         document.querySelectorAll('a.nav-link[href^="#"]').forEach(anchor => {
             anchor.addEventListener('click', function (e) {
                 e.preventDefault();
                 const targetId = this.getAttribute('href');
-                const targetElement = document.querySelector(targetId);
-                if (targetElement) {
-                    targetElement.scrollIntoView({
-                        behavior: 'smooth'
-                    });
+                
+                // If it's a portfolio link, ensure portfolio is visible
+                if (targetId !== '#') {
+                    goToPortfolio();
+                    // We need to wait a tick for the view to become visible
+                    setTimeout(() => {
+                        const targetElement = document.querySelector(targetId);
+                        if (targetElement) {
+                            targetElement.scrollIntoView({
+                                behavior: 'smooth'
+                            });
+                            // Update hash manually
+                            window.location.hash = targetId;
+                        }
+                    }, 0);
                 }
             });
         });
+        
+        // --- Typing Text Animation ---
+        const typingText = document.getElementById('typing-text');
+        const roles = ["Software Engineer", "AI & ML Enthusiast", "Full-Stack Developer", "Problem Solver"];
+        let roleIndex = 0;
+        let charIndex = 0;
+        let isDeleting = false;
 
-        // --- Animate sections on scroll ---
+        function type() {
+            const currentRole = roles[roleIndex];
+            if (isDeleting) {
+                typingText.textContent = currentRole.substring(0, charIndex - 1);
+                charIndex--;
+            } else {
+                typingText.textContent = currentRole.substring(0, charIndex + 1);
+                charIndex++;
+            }
+
+            if (!isDeleting && charIndex === currentRole.length) {
+                setTimeout(() => isDeleting = true, 2000); // Pause at end
+            } else if (isDeleting && charIndex === 0) {
+                isDeleting = false;
+                roleIndex = (roleIndex + 1) % roles.length;
+            }
+            
+            const typeSpeed = isDeleting ? 75 : 150;
+            setTimeout(type, typeSpeed);
+        }
+        if (typingText) type();
+
+        // --- Fade-in Sections on Scroll ---
         const fadeSections = document.querySelectorAll('.fade-in-section');
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
@@ -971,9 +1034,10 @@
         });
 
         // --- Footer Current Year ---
-        document.getElementById('current-year').textContent = new Date().getFullYear();
+        const currentYearEl = document.getElementById('current-year');
+        if (currentYearEl) currentYearEl.textContent = new Date().getFullYear();
 
-        // --- Contact Form (Demo) ---
+        // --- Contact Form ---
         const contactForm = document.getElementById('contact-form');
         const formMessage = document.getElementById('form-message');
         contactForm.addEventListener('submit', function(e) {
@@ -1024,21 +1088,18 @@
             floatingContainer.appendChild(initial);
         }
 
-        for (let i = 0; i < numInitials; i++) {
-            createFloatingInitial();
+        if (floatingContainer) {
+            for (let i = 0; i < numInitials; i++) {
+                createFloatingInitial();
+            }
         }
-
-        // --- Leaderboard Logic ---
-        // Moved to the main <script type="module"> block to access 'db'
         
-        // --- Gemini Helper Modal ---
+        // --- Gemini Contact Helper Modal ---
         const geminiHelperBtn = document.getElementById('gemini-helper-btn');
-        const geminiHelperModal = document.getElementById('gemini-helper-modal');
         const cancelGeminiBtn = document.getElementById('cancel-gemini-btn');
         const geminiHelperForm = document.getElementById('gemini-helper-form');
         const generateDraftBtn = document.getElementById('generate-draft-btn');
-        const geminiLoading = document.getElementById('gemini-loading');
-        const messageTextarea = document.getElementById('message');
+        const contactMessage = document.getElementById('message');
 
         geminiHelperBtn.addEventListener('click', () => {
             geminiHelperModal.classList.remove('hidden');
@@ -1046,418 +1107,67 @@
         cancelGeminiBtn.addEventListener('click', () => {
             geminiHelperModal.classList.add('hidden');
         });
-
+        
         geminiHelperForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const keywords = document.getElementById('gemini-keywords').value;
             if (!keywords) return;
 
-            generateDraftBtn.classList.add('hidden');
-            geminiLoading.classList.remove('hidden');
+            const originalBtnText = generateDraftBtn.innerHTML;
+            generateDraftBtn.innerHTML = '<div class="spinner w-6 h-6 border-2 border-white border-b-transparent mx-auto"></div>';
+            generateDraftBtn.disabled = true;
 
-            const prompt = `You are a professional assistant helping someone write a contact message for a portfolio website. The user's name is Rohith Reddy. The recipient is also Rohith Reddy (the owner of the portfolio).
-            Based on the following keywords, write a polite and professional message (about 3-4 sentences long) that the user can send.
-            Keywords: "${keywords}"
-            
-            Start the message with "Hi Rohith," and sign off with the user's name (which they will fill in). Just provide the message body.`;
+            const systemPrompt = "You are a professional assistant helping a user draft a concise, friendly, and professional message for their portfolio contact form. The user will provide keywords. Use them to write a 2-3 sentence message. Do not include a subject line or greeting (e.g., 'Hi Rohith,'). Start directly with the message content.";
+            const userQuery = `Keywords: ${keywords}`;
 
             try {
-                const generatedText = await callGemini(prompt, false); // No search needed
-                messageTextarea.value = generatedText;
+                const draft = await callGemini(systemPrompt, userQuery);
+                contactMessage.value = draft;
                 geminiHelperModal.classList.add('hidden');
             } catch (error) {
-                messageTextarea.value = "Sorry, I couldn't generate a draft. Please try again.\n\nKeywords: " + keywords;
+                console.error("Gemini draft error:", error);
+                contactMessage.value = "Sorry, I couldn't generate a draft right now. Please try again.";
             } finally {
-                generateDraftBtn.classList.remove('hidden');
-                geminiLoading.classList.add('hidden');
-            }
-        });
-
-        // --- Game Over Motivation Button ---
-        const getMotivationBtn = document.getElementById('get-motivation-btn');
-        const motivationArea = document.getElementById('motivation-area');
-        const motivationText = document.getElementById('motivation-text');
-        const motivationLoading = document.getElementById('motivation-loading');
-
-        getMotivationBtn.addEventListener('click', async () => {
-            const finalScore = document.getElementById('final-score').textContent;
-            motivationArea.classList.remove('hidden');
-            motivationLoading.classList.remove('hidden');
-            getMotivationBtn.classList.add('hidden');
-            motivationText.textContent = '';
-            
-            const prompt = `I just scored ${finalScore} in Tetris. Give me a short (one sentence), funny, and slightly snarky motivational message.`;
-
-            try {
-                const motivation = await callGemini(prompt, false);
-                motivationText.textContent = motivation;
-            } catch (error) {
-                motivationText.textContent = "You're doing great! (Gemini is busy, but I'm not!)";
-            } finally {
-                motivationLoading.classList.add('hidden');
+                generateDraftBtn.innerHTML = originalBtnText;
+                generateDraftBtn.disabled = false;
             }
         });
 
 
-    }); // End of DOMContentLoaded
+        // =================================================================
+        // =========== TETRIS GAME LOGIC ===========
+        // =================================================================
 
-    // --- Gemini API Call Function ---
-    async function callGemini(prompt, useSearch) {
-        const apiKey = ""; // API key is handled by the environment
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-        
-        const systemPrompt = "You are a helpful assistant integrated into a portfolio website. Be concise and friendly.";
-        
-        const payload = {
-            contents: [{ parts: [{ text: prompt }] }],
-            systemInstruction: {
-                parts: [{ text: systemPrompt }]
-            },
-        };
-
-        if (useSearch) {
-            payload.tools = [{ "google_search": {} }];
-        }
-
-        // Add retry logic
-        let response;
-        for (let i = 0; i < 3; i++) { // Retry up to 3 times
-            try {
-                response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (response.ok) {
-                    const result = await response.json();
-                    if (result.candidates && result.candidates[0].content?.parts?.[0]?.text) {
-                        return result.candidates[0].content.parts[0].text;
-                    } else {
-                        throw new Error("Invalid API response structure");
-                    }
-                } else {
-                    throw new Error(`Fetch failed with status: ${response.status}`);
-                }
-            } catch (error) {
-                console.warn(`Gemini API call attempt ${i + 1} failed:`, error.message);
-                if (i === 2) { // Last retry failed
-                    console.error("Gemini API call failed permanently:", error);
-                    throw new Error("Failed to get response from Gemini.");
-                }
-                await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Exponential backoff
-            }
-        }
-    }
-
-
-    // --- Firestore Leaderboard Functions ---
-    // These need to be in the module script, so I'll move them
-    // For now, these stubs are here, but the real logic is in the <script type="module">
-    function attachLeaderboardListener() {
-        // console.log("Stub: attachLeaderboardListener");
-        // This function's real implementation is in the module script
-        // to get access to 'db', 'onSnapshot', etc.
-    }
-    
-    function fetchLeaderboard() {
-        // console.log("Stub: fetchLeaderboard");
-        // This function's real implementation is in the module script
-    }
-    
-    async function saveScoreToLeaderboard(name, score) {
-        // console.log("Stub: saveScoreToLeaderboard");
-        // This function's real implementation is in the module script
-    }
-
-    </script>
-    
-    <!-- Main Module Script (contains all Firebase & Game Logic) -->
-    <script type="module">
-        // Re-import shared functions
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, setDoc, query, where, orderBy, limit, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // --- Firebase & App Config ---
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        let db, auth, userId;
-        let tetrisLeaderboardUnsubscribe = null;
-        let currentPlayerName = "Player";
-        let isGameActive = false;
-        
-        // --- App Views & Modals ---
-        const portfolioView = document.getElementById('portfolio-view');
-        const gameView = document.getElementById('game-view');
-        const leaderboardView = document.getElementById('leaderboard-view');
-        const nameModal = document.getElementById('name-modal');
-        const gameOverModal = document.getElementById('game-over-modal');
-        const pauseOverlay = document.getElementById('pause-overlay');
-        
-        // --- DOM Elements ---
-        const scoreElement = document.getElementById('game-score');
-        const levelElement = document.getElementById('game-level');
-        const linesElement = document.getElementById('game-lines');
         const canvas = document.getElementById('tetris-canvas');
         const context = canvas.getContext('2d');
         const nextCanvas = document.getElementById('next-canvas');
         const nextContext = nextCanvas.getContext('2d');
-
-        // --- Navigation (Re-linking from module) ---
+        const scoreEl = document.getElementById('game-score');
+        const levelEl = document.getElementById('game-level');
+        const linesEl = document.getElementById('game-lines');
+        const playerNameEl = document.getElementById('game-player-name');
+        const pauseOverlay = document.getElementById('pause-overlay');
+        const nameForm = document.getElementById('name-form');
+        const cancelGameBtn = document.getElementById('cancel-game-btn');
+        const playAgainBtn = document.getElementById('play-again-btn');
+        const finalScoreEl = document.getElementById('final-score');
+        const finalPlayerNameEl = document.getElementById('final-player-name');
         
-        function showView(viewToShow) {
-            [portfolioView, gameView, leaderboardView].forEach(view => {
-                view.classList.add('hidden');
-            });
-            if (viewToShow) {
-                viewToShow.classList.remove('hidden');
-            }
-            window.scrollTo(0, 0);
-        }
+        const getMotivationBtn = document.getElementById('get-motivation-btn');
+        const motivationArea = document.getElementById('motivation-area');
+        const motivationText = document.getElementById('motivation-text');
 
-        document.getElementById('home-link').addEventListener('click', (e) => {
-            e.preventDefault();
-            if (isGameActive) pauseGame();
-            showView(portfolioView);
-            document.getElementById('back-to-game-btn').classList.add('hidden');
-        });
-
-        [document.getElementById('game-nav-btn'), document.getElementById('game-nav-btn-mobile'), document.getElementById('game-project-btn')].forEach(btn => {
-            btn.addEventListener('click', () => {
-                showView(portfolioView);
-                nameModal.classList.remove('hidden');
-                if (document.getElementById('mobile-menu').classList.contains('hidden') === false) {
-                    document.getElementById('mobile-menu').classList.add('hidden');
-                }
-            });
-        });
-
-        document.getElementById('name-form').addEventListener('submit', (e) => {
-            e.preventDefault();
-            currentPlayerName = document.getElementById('player-name').value.trim() || "Anonymous";
-            nameModal.classList.add('hidden');
-            showView(gameView);
-            document.getElementById('player-name-display').textContent = currentPlayerName;
-            startGame();
-        });
-
-        document.getElementById('cancel-game-btn').addEventListener('click', () => {
-            nameModal.classList.add('hidden');
-        });
-
-        document.getElementById('view-leaderboard-btn').addEventListener('click', () => {
-            if (isGameActive) pauseGame();
-            showView(leaderboardView);
-            document.getElementById('back-to-game-btn').classList.remove('hidden');
-            fetchLeaderboard(); // Manually trigger fetch
-        });
-
-        document.getElementById('leaderboard-from-gameover-btn').addEventListener('click', () => {
-            gameOverModal.classList.add('hidden');
-            showView(leaderboardView);
-            document.getElementById('back-to-game-btn').classList.add('hidden');
-            fetchLeaderboard(); // Manually trigger fetch
-        });
-
-        [document.getElementById('back-to-portfolio-btn'), document.getElementById('back-to-portfolio-btn-2')].forEach(btn => {
-            btn.addEventListener('click', () => {
-                if (isGameActive) pauseGame();
-                showView(portfolioView);
-                document.getElementById('back-to-game-btn').classList.add('hidden');
-            });
-        });
-        
-        document.getElementById('back-to-game-btn').addEventListener('click', () => {
-            showView(gameView);
-            // Don't resume automatically
-        });
-
-        document.getElementById('play-again-btn').addEventListener('click', () => {
-            gameOverModal.classList.add('hidden');
-            startGame();
-        });
-
-        // --- Firebase Init & Auth (Module Scope) ---
-        async function initializeFirebase() {
-            try {
-                if (!firebaseConfig.apiKey) {
-                    console.log("Firebase config not found. Leaderboard will be disabled.");
-                    return;
-                }
-                
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                // setLogLevel('debug');
-
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        // console.log("User is signed in (Module):", userId);
-                        attachLeaderboardListener(); // Attach listener *after* auth
-                    } else {
-                        userId = null;
-                        // console.log("User is signed out (Module).");
-                        if (tetrisLeaderboardUnsubscribe) {
-                            tetrisLeaderboardUnsubscribe();
-                            tetrisLeaderboardUnsubscribe = null;
-                        }
-                    }
-                });
-
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
-            } catch (error) {
-                console.error("Firebase Initialization Error (Module):", error);
-            }
-        }
-        
-        initializeFirebase(); // Call from module
-        
-        // --- Firestore Leaderboard Functions (Module Scope) ---
-        
-        function attachLeaderboardListener() {
-            if (!db || !userId) {
-                // console.log("DB not ready or user not auth'd, skipping listener.");
-                return;
-            }
-            if (tetrisLeaderboardUnsubscribe) {
-                // console.log("Listener already attached.");
-                return; // Already listening
-            }
-
-            // console.log("Attaching leaderboard listener...");
-            const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
-            const q = query(collection(db, leaderboardCollectionPath), orderBy("score", "desc"), limit(10));
-            
-            tetrisLeaderboardUnsubscribe = onSnapshot(q, (snapshot) => {
-                // console.log("Leaderboard snapshot received");
-                document.getElementById('leaderboard-list-loading').classList.add('hidden');
-                const scores = [];
-                snapshot.forEach(doc => {
-                    scores.push(doc.data());
-                });
-                updateLeaderboardUI(scores);
-            }, (error) => {
-                console.error("Error getting leaderboard:", error);
-                document.getElementById('leaderboard-list-loading').classList.add('hidden');
-            });
-        }
-        
-        // This function is called by the snapshot listener
-        function updateLeaderboardUI(scores) {
-            const list = document.getElementById('leaderboard-list');
-            list.innerHTML = ''; // Clear old list
-
-            // Top 3
-            const top3Ids = ['leader-1', 'leader-2', 'leader-3'];
-            top3Ids.forEach((id, index) => {
-                const el = document.getElementById(id);
-                const scoreData = scores[index];
-                if (scoreData) {
-                    el.querySelector('div:nth-of-type(1)').textContent = scoreData.name;
-                    el.querySelector('div:nth-of-type(2)').textContent = scoreData.score;
-                } else {
-                    el.querySelector('div:nth-of-type(1)').textContent = '...';
-                    el.querySelector('div:nth-of-type(2)').textContent = '...';
-                }
-            });
-
-            // Ranks 4-10
-            if (scores.length > 3) {
-                scores.slice(3).forEach((scoreData, index) => {
-                    const li = document.createElement('li');
-                    li.className = 'flex justify-between items-center bg-gray-700 p-4 rounded-lg';
-                    li.innerHTML = `
-                        <div class="flex items-center">
-                            <span class="text-gray-400 font-bold w-6 text-left">${index + 4}</span>
-                            <span class="text-white font-semibold ml-4 truncate">${scoreData.name}</span>
-                        </div>
-                        <span class="text-blue-400 font-bold">${scoreData.score}</span>
-                    `;
-                    list.appendChild(li);
-                });
-            }
-        }
-        
-        // This is a manual fetch, e.g., when opening leaderboard
-        async function fetchLeaderboard() {
-            if (!db || !userId) {
-                // console.log("DB not ready or user not auth'd, cannot fetch.");
-                attachLeaderboardListener(); // Try to attach listener if not already
-                return;
-            }
-            // console.log("Manually fetching leaderboard...");
-            document.getElementById('leaderboard-list-loading').classList.remove('hidden');
-            
-            const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
-            const q = query(collection(db, leaderboardCollectionPath), orderBy("score", "desc"), limit(10));
-            
-            try {
-                const querySnapshot = await getDocs(q);
-                const scores = [];
-                querySnapshot.forEach(doc => {
-                    scores.push(doc.data());
-                });
-                updateLeaderboardUI(scores);
-            } catch (error) {
-                console.error("Error manually fetching leaderboard:", error);
-            } finally {
-                document.getElementById('leaderboard-list-loading').classList.add('hidden');
-            }
-        }
-        
-        async function saveScoreToLeaderboard(name, score) {
-            if (!db || !userId) {
-                console.warn("Firestore not initialized or user not authenticated. Score not saved.");
-                return;
-            }
-            if (!name || score === 0) {
-                console.warn("Invalid name or score zero. Score not saved.");
-                return;
-            }
-
-            try {
-                // We use a public path for a shared leaderboard
-                const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
-                // Create a doc ID based on user and timestamp to prevent overwrites
-                const docId = `${userId}_${Date.now()}`;
-                const docRef = doc(db, leaderboardCollectionPath, docId);
-                
-                await setDoc(docRef, {
-                    name: name,
-                    score: score,
-                    timestamp: serverTimestamp(),
-                    userId: userId // Store who submitted
-                });
-                // console.log("Score saved successfully!");
-            } catch (error) {
-                console.error("Error saving score to leaderboard: ", error);
-            }
-        }
-        
-        
-        // --- Tetris Game Logic ---
-        
         const COLS = 10;
         const ROWS = 20;
         const BLOCK_SIZE = 30; // 30px per block
-        
-        canvas.width = COLS * BLOCK_SIZE;
-        canvas.height = ROWS * BLOCK_SIZE;
+
+        context.canvas.width = COLS * BLOCK_SIZE;
+        context.canvas.height = ROWS * BLOCK_SIZE;
         context.scale(BLOCK_SIZE, BLOCK_SIZE);
         
-        nextCanvas.width = 4 * (BLOCK_SIZE / 1.5);
-        nextCanvas.height = 4 * (BLOCK_SIZE / 1.5);
-        nextContext.scale(BLOCK_SIZE / 1.5, BLOCK_SIZE / 1.5); // Smaller blocks for preview
+        nextContext.canvas.width = 4 * (BLOCK_SIZE / 2); // Scaled down
+        nextContext.canvas.height = 4 * (BLOCK_SIZE / 2);
+        nextContext.scale(BLOCK_SIZE / 1.5, BLOCK_SIZE / 1.5); // Adjust scale for better fit
 
         const COLORS = [
             null,
@@ -1476,70 +1186,85 @@
             'T': [[0, 3, 0], [3, 3, 3], [0, 0, 0]],
             'S': [[0, 4, 4], [4, 4, 0], [0, 0, 0]],
             'Z': [[5, 5, 0], [0, 5, 5], [0, 0, 0]],
-            'J': [[6, 0, 0], [6, 6, 6], [0, 0, 0]], // Corrected J
-            'L': [[0, 0, 7], [7, 7, 7], [0, 0, 0]]  // Corrected L
+            'J': [[6, 0, 0], [6, 6, 6], [0, 0, 0]], 
+            'L': [[0, 0, 7], [7, 7, 7], [0, 0, 0]]
         };
 
         let board;
         let player;
         let nextPiece;
-        let gameReqId;
-        let gameTime;
-        let isPaused;
-
         let score;
-        let lines;
         let level;
+        let lines;
+        let playerName = "";
+        let gameRunning = false;
+        let gamePaused = false;
+        let dropCounter;
+        let dropInterval;
 
-        const linePoints = [0, 40, 100, 300, 1200]; // 0, 1, 2, 3, 4 lines
+        let animationFrameId;
 
         function createBoard() {
             return Array.from({ length: ROWS }, () => Array(COLS).fill(0));
         }
 
-        function getNewPiece() {
-            const pieces = 'IOTSZJL';
-            const type = pieces[pieces.length * Math.random() | 0];
+        function createPiece(type) {
             const matrix = TETROMINOS[type];
             return {
-                matrix: matrix,
                 pos: { x: Math.floor(COLS / 2) - Math.floor(matrix[0].length / 2), y: 0 },
+                matrix: matrix,
                 type: type
             };
         }
 
-        function drawMatrix(matrix, offset, ctx) {
+        function getRandomPiece() {
+            const types = 'IOTSZJL';
+            const type = types[Math.floor(Math.random() * types.length)];
+            return createPiece(type);
+        }
+
+        function playerReset() {
+            player = nextPiece;
+            nextPiece = getRandomPiece();
+            drawNextPiece();
+            if (checkCollision(board, player)) {
+                gameOver();
+            }
+        }
+
+        function draw() {
+            context.fillStyle = '#171717';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            
+            drawMatrix(context, board, { x: 0, y: 0 });
+            drawMatrix(context, player.matrix, player.pos);
+        }
+
+        function drawMatrix(ctx, matrix, offset) {
             matrix.forEach((row, y) => {
                 row.forEach((value, x) => {
                     if (value !== 0) {
                         ctx.fillStyle = COLORS[value];
                         ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
-                        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-                        ctx.lineWidth = 0.1;
-                        ctx.strokeRect(x + offset.x, y + offset.y, 1, 1);
+                        // Adding a slight inner bevel for 3D effect
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+                        ctx.fillRect(x + offset.x + 0.1, y + offset.y + 0.1, 0.8, 0.8);
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+                        ctx.fillRect(x + offset.x + 0.2, y + offset.y + 0.2, 0.6, 0.6);
                     }
                 });
             });
         }
-
+        
         function drawNextPiece() {
-            nextContext.fillStyle = '#1f2937'; // bg-gray-800
+            nextContext.fillStyle = '#1f2937'; // Gray-800
             nextContext.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
             
             const matrix = nextPiece.matrix;
-            const offset = {
-                x: (4 - matrix[0].length) / 2,
-                y: (4 - matrix.length) / 2
-            };
-            drawMatrix(matrix, offset, nextContext);
-        }
-
-        function drawGame() {
-            context.fillStyle = '#171717'; // Dark gray bg
-            context.fillRect(0, 0, canvas.width, canvas.height);
+            const xOffset = (nextCanvas.width / (BLOCK_SIZE / 1.5) - matrix[0].length) / 2;
+            const yOffset = (nextCanvas.height / (BLOCK_SIZE / 1.5) - matrix.length) / 2;
             
-            drawMatrix(board, { x: 0, y: 0 }, context); // Draw frozen pieces
-            drawMatrix(player.matrix, player.pos, context); // Draw current piece
+            drawMatrix(nextContext, matrix, { x: xOffset, y: yOffset });
         }
 
         function merge(board, player) {
@@ -1552,87 +1277,83 @@
             });
         }
 
-        function collide(board, player) {
-            const [matrix, pos] = [player.matrix, player.pos];
+        function checkCollision(board, player) {
+            const { matrix, pos } = player;
             for (let y = 0; y < matrix.length; y++) {
-                for (let x = 0; x < matrix[y].length; x++) {
-                    if (matrix[y][x] !== 0 &&
-                        (board[y + pos.y] && board[y + pos.y][x + pos.x]) !== 0) {
-                        return true;
+                for (let x = 0; x < matrix[0].length; x++) {
+                    if (matrix[y][x] !== 0) {
+                        if (!board[y + pos.y] || // Out of bounds (bottom)
+                            board[y + pos.y][x + pos.x] !== 0) { // Collides with another piece
+                            return true;
+                        }
                     }
                 }
             }
             return false;
         }
 
-        function rotate(matrix, dir) {
-            const N = matrix.length;
-            const newMatrix = Array.from({ length: N }, () => Array(N).fill(0));
-            for (let y = 0; y < N; y++) {
-                for (let x = 0; x < N; x++) {
-                    if (dir > 0) { // Clockwise
-                        newMatrix[x][N - 1 - y] = matrix[y][x];
-                    } else { // Counter-clockwise (not used, but good to have)
-                        newMatrix[N - 1 - x][y] = matrix[y][x];
-                    }
-                }
+        function playerDrop() {
+            if (gamePaused) return;
+            player.pos.y++;
+            if (checkCollision(board, player)) {
+                player.pos.y--;
+                merge(board, player);
+                sweepLines();
+                playerReset();
             }
-            return newMatrix;
-        }
-
-        function playerRotate() {
-            const pos = player.pos.x;
-            let offset = 1;
-            const rotated = rotate(player.matrix, 1);
-            
-            const newPlayer = { ...player, matrix: rotated };
-
-            while (collide(board, newPlayer)) {
-                newPlayer.pos.x += offset;
-                offset = -(offset + (offset > 0 ? 1 : -1));
-                if (offset > newPlayer.matrix[0].length) {
-                    // Can't rotate, so revert
-                    return;
-                }
-            }
-            player.matrix = newPlayer.matrix;
-            player.pos.x = newPlayer.pos.x;
+            dropCounter = 0;
         }
 
         function playerMove(dir) {
+            if (gamePaused) return;
             player.pos.x += dir;
-            if (collide(board, player)) {
-                player.pos.x -= dir; // Move back
+            if (checkCollision(board, player)) {
+                player.pos.x -= dir;
             }
         }
-
-        function playerDrop() {
-            player.pos.y++;
-            if (collide(board, player)) {
-                player.pos.y--;
-                pieceLock();
-                return;
+        
+        function playerRotate() {
+            if (gamePaused) return;
+            const N = player.matrix.length;
+            const newMatrix = Array.from({ length: N }, () => Array(N).fill(0));
+            
+            for (let y = 0; y < N; y++) {
+                for (let x = 0; x < N; x++) {
+                    newMatrix[x][N - 1 - y] = player.matrix[y][x];
+                }
             }
-            gameTime.dropCounter = 0;
+            
+            const oldPos = player.pos.x;
+            let offset = 1;
+            player.matrix = newMatrix;
+            
+            // Wall kick logic
+            while (checkCollision(board, player)) {
+                player.pos.x += offset;
+                offset = -(offset + (offset > 0 ? 1 : -1));
+                if (offset > N) {
+                    // Can't rotate, revert
+                    playerRotate(); // Rotate back
+                    player.pos.x = oldPos;
+                    return;
+                }
+            }
         }
-
+        
         function playerHardDrop() {
-            while (!collide(board, player)) {
+            if (gamePaused) return;
+            while (!checkCollision(board, player)) {
                 player.pos.y++;
             }
-            player.pos.y--; // Move back one
-            pieceLock();
-        }
-
-        function pieceLock() {
+            player.pos.y--;
             merge(board, player);
             sweepLines();
             playerReset();
-            updateScore();
+            dropCounter = 0;
         }
 
         function sweepLines() {
-            let rowCount = 0;
+            let clearedLines = 0;
             outer: for (let y = board.length - 1; y > 0; y--) {
                 for (let x = 0; x < board[y].length; x++) {
                     if (board[y][x] === 0) {
@@ -1640,156 +1361,287 @@
                     }
                 }
                 
-                // Full line
                 const row = board.splice(y, 1)[0].fill(0);
                 board.unshift(row);
-                y++; // Check the same row again
-                rowCount++;
+                y++;
+                clearedLines++;
             }
             
-            if (rowCount > 0) {
-                score += linePoints[rowCount] * level;
-                lines += rowCount;
-                // Level up every 10 lines
-                if (lines >= level * 10) {
-                    level++;
-                    gameTime.dropInterval = 1000 / level; // Speed up
-                }
+            if (clearedLines > 0) {
+                // Update score
+                const linePoints = [0, 100, 300, 500, 800];
+                score += linePoints[clearedLines] * level;
+                lines += clearedLines;
+                
+                // Update level (every 10 lines)
+                level = Math.floor(lines / 10) + 1;
+                
+                // Update drop interval
+                dropInterval = 1000 / level;
+                
+                updateScoreboard();
             }
         }
 
-        function playerReset() {
-            player = nextPiece;
-            nextPiece = getNewPiece();
-            
-            player.pos.x = (COLS / 2 | 0) - (player.matrix[0].length / 2 | 0);
-            player.pos.y = 0;
-            
-            if (collide(board, player)) {
-                // Game Over
-                gameOver();
-            }
-            
-            drawNextPiece();
-        }
-        
-        function updateScore() {
-            scoreElement.textContent = score;
-            linesElement.textContent = lines;
-            levelElement.textContent = level;
+        function updateScoreboard() {
+            scoreEl.textContent = score;
+            levelEl.textContent = level;
+            linesEl.textContent = lines;
         }
 
         let lastTime = 0;
-        function update(time = 0) {
-            if (isPaused) return;
-
-            const deltaTime = time - lastTime;
-            lastTime = time;
+        function gameLoop(time = 0) {
+            if (!gameRunning) return;
             
-            gameTime.dropCounter += deltaTime;
-            if (gameTime.dropCounter > gameTime.dropInterval) {
-                playerDrop();
+            if (!gamePaused) {
+                const deltaTime = time - lastTime;
+                lastTime = time;
+                
+                dropCounter += deltaTime;
+                if (dropCounter > dropInterval) {
+                    playerDrop();
+                }
+                
+                draw();
             }
             
-            drawGame();
-            gameReqId = requestAnimationFrame(update);
+            animationFrameId = requestAnimationFrame(gameLoop);
         }
 
-        function startGame() {
+        function startGame(name) {
+            playerName = name;
+            playerNameEl.textContent = playerName;
+            
             board = createBoard();
-            nextPiece = getNewPiece();
-            playerReset(); // This sets `player` and gets a new `nextPiece`
-            
             score = 0;
-            lines = 0;
             level = 1;
+            lines = 0;
+            dropCounter = 0;
+            dropInterval = 1000;
+            gameRunning = true;
+            gamePaused = false;
             
-            gameTime = {
-                dropCounter: 0,
-                dropInterval: 1000 // 1 second per level
-            };
+            nextPiece = getRandomPiece(); // Initialize next piece
+            playerReset(); // Get first piece
+            updateScoreboard();
             
-            isPaused = false;
-            isGameActive = true;
-            pauseOverlay.classList.add('hidden');
+            showView(gameView);
             
-            updateScore();
-            
-            // Clear any old game loops
-            if (gameReqId) {
-                cancelAnimationFrame(gameReqId);
-            }
-            
-            // console.log("Starting game...");
-            update();
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            gameLoop();
         }
-        
+
         function gameOver() {
-            // console.log("Game Over!");
-            isGameActive = false;
-            cancelAnimationFrame(gameReqId);
-            gameReqId = null;
+            gameRunning = false;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
             
-            // Show Game Over Modal
-            document.getElementById('final-player-name').textContent = currentPlayerName;
-            document.getElementById('final-score').textContent = score;
+            finalScoreEl.textContent = score;
+            finalPlayerNameEl.textContent = playerName;
+            
+            // Reset and hide motivation button
+            motivationArea.classList.add('hidden');
+            motivationText.textContent = '';
+            getMotivationBtn.disabled = false;
+            getMotivationBtn.innerHTML = '✨ Get Motivation';
+            
             gameOverModal.classList.remove('hidden');
             
-            // Reset motivation button
-            document.getElementById('motivation-area').classList.add('hidden');
-            document.getElementById('motivation-text').textContent = '';
-            document.getElementById('get-motivation-btn').classList.remove('hidden');
+            // Save score to Firebase
+            if (window.saveScore) {
+                window.saveScore(playerName, score);
+            } else {
+                console.error("saveScore function not found on window.");
+            }
+        }
+
+        function pauseGame() {
+            if (!gameRunning) return;
+            gamePaused = !gamePaused;
+            pauseOverlay.classList.toggle('hidden', !gamePaused);
+        }
+
+        // --- Game Event Listeners ---
+        nameForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = document.getElementById('player-name').value;
+            if (name) {
+                nameModal.classList.add('hidden');
+                startGame(name);
+            }
+        });
+        
+        cancelGameBtn.addEventListener('click', () => {
+            nameModal.classList.add('hidden');
+        });
+        
+        playAgainBtn.addEventListener('click', () => {
+            gameOverModal.classList.add('hidden');
+            nameModal.classList.remove('hidden'); // Ask for name again
+        });
+
+        // Keyboard Controls
+        document.addEventListener('keydown', e => {
+            if (!gameRunning) return;
             
-            // Save score
-            saveScoreToLeaderboard(currentPlayerName, score);
+            if (e.key === 'ArrowLeft') playerMove(-1);
+            else if (e.key === 'ArrowRight') playerMove(1);
+            else if (e.key === 'ArrowDown') playerDrop();
+            else if (e.key === 'ArrowUp') playerRotate();
+            else if (e.key === ' ') {
+                e.preventDefault(); // Prevent page jump
+                playerHardDrop();
+            }
+            else if (e.key === 'p' || e.key === 'P') pauseGame();
+        });
+
+        // --- Mobile Button Controls ---
+        const btnLeft = document.getElementById('mobile-left');
+        const btnRight = document.getElementById('mobile-right');
+        const btnRotate = document.getElementById('mobile-rotate');
+        const btnSoftDrop = document.getElementById('mobile-soft-drop');
+        const btnHardDrop = document.getElementById('mobile-hard-drop');
+
+        // Use touchstart for faster response than click
+        btnLeft.addEventListener('touchstart', (e) => { e.preventDefault(); playerMove(-1); });
+        btnRight.addEventListener('touchstart', (e) => { e.preventDefault(); playerMove(1); });
+        btnRotate.addEventListener('touchstart', (e) => { e.preventDefault(); playerRotate(); });
+        btnSoftDrop.addEventListener('touchstart', (e) => { e.preventDefault(); playerDrop(); });
+        btnHardDrop.addEventListener('touchstart', (e) => { e.preventDefault(); playerHardDrop(); });
+
+        // --- Mobile Swipe & Tap Controls (on canvas) ---
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let touchThreshold = 30; // Min pixels for a swipe
+
+        canvas.addEventListener('touchstart', (e) => {
+            if (!gameRunning || gamePaused) return;
+            e.preventDefault();
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (!gameRunning || gamePaused || !touchStartX || !touchStartY) return;
+            e.preventDefault();
+
+            let touchEndX = e.touches[0].clientX;
+            let touchEndY = e.touches[0].clientY;
+            let diffX = touchEndX - touchStartX;
+            let diffY = touchEndY - touchStartY;
+
+            if (Math.abs(diffX) > Math.abs(diffY)) { // Horizontal swipe
+                if (Math.abs(diffX) > touchThreshold) {
+                    if (diffX > 0) {
+                        playerMove(1); // Right
+                    } else {
+                        playerMove(-1); // Left
+                    }
+                    // Reset start after a successful move to prevent multiple moves per swipe
+                    touchStartX = touchEndX;
+                    touchStartY = touchEndY;
+                }
+            } else { // Vertical swipe
+                if (diffY > touchThreshold) { // Swipe down
+                    playerDrop();
+                    touchStartX = touchEndX;
+                    touchStartY = touchEndY;
+                }
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', (e) => {
+            if (!gameRunning || gamePaused) return;
+            e.preventDefault();
+            
+            // Check if it was a tap (no significant move)
+            let touchEndX = e.changedTouches[0].clientX;
+            let touchEndY = e.changedTouches[0].clientY;
+            let diffX = Math.abs(touchEndX - touchStartX);
+            let diffY = Math.abs(touchEndY - touchStartY);
+
+            if (diffX < touchThreshold && diffY < touchThreshold) {
+                // It's a tap!
+                playerRotate();
+            }
+
+            // Reset touch start points
+            touchStartX = 0;
+            touchStartY = 0;
+        }, { passive: false });
+
+
+        // --- Gemini API Call ---
+        const GEMINI_API_KEY = "AIzaSyDMAQWE8TSAIY01Fs0ah_jllWVBRJy_o9A"; // <-- YOUR KEY IS PASTED HERE
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+
+        async function callGemini(systemPrompt, userQuery, retries = 3, delay = 1000) {
+            if (!GEMINI_API_KEY) {
+                console.error("Gemini API Key is missing.");
+                return "Sorry, the AI helper is not configured.";
+            }
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            try {
+                const response = await fetch(GEMINI_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    if (response.status === 429 && retries > 0) {
+                        // Throttled, retry with exponential backoff
+                        await new Promise(res => setTimeout(res, delay));
+                        return callGemini(systemPrompt, userQuery, retries - 1, delay * 2);
+                    }
+                    throw new Error(`Fetch Error: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    return candidate.content.parts[0].text;
+                } else {
+                    return "Sorry, I couldn't generate a response.";
+                }
+            } catch (error) {
+                console.error("Fetch Error:", error);
+                if (retries > 0) {
+                    // Network error, retry
+                    await new Promise(res => setTimeout(res, delay));
+                    return callGemini(systemPrompt, userQuery, retries - 1, delay * 2);
+                }
+                return `Sorry, an error occurred: ${error.message}`;
+            }
         }
         
-        function pauseGame() {
-            if (!gameReqId) return; // Not running
-            
-            if (isPaused) {
-                // Resume
-                isPaused = false;
-                pauseOverlay.classList.add('hidden');
-                update(lastTime); // Restart update loop
-            } else {
-                // Pause
-                isPaused = true;
-                pauseOverlay.classList.remove('hidden');
-                cancelAnimationFrame(gameReqId);
-            }
-        }
+        // --- Game Over Motivation ---
+        getMotivationBtn.addEventListener('click', async () => {
+            getMotivationBtn.disabled = true;
+            getMotivationBtn.innerHTML = '<div class="spinner w-5 h-5 border-2 border-white border-b-transparent mx-auto"></div>';
+            motivationArea.classList.remove('hidden');
+            motivationText.textContent = 'Thinking...';
 
-        // --- Keyboard Controls ---
-        document.addEventListener('keydown', event => {
-            if (!isGameActive) return;
+            const systemPrompt = "You are a fun, slightly sassy, and encouraging retro arcade game mascot. A player just lost a game of Tetris. Give them a very short (1-2 sentences) motivational or funny message. Keep it light-hearted. Do not use emojis.";
+            const userQuery = `My final score was ${score}.`;
 
-            if (event.key === 'p' || event.key === 'P') {
-                pauseGame();
-            }
-
-            if (isPaused) return;
-
-            switch (event.key) {
-                case 'ArrowLeft':
-                    playerMove(-1);
-                    break;
-                case 'ArrowRight':
-                    playerMove(1);
-                    break;
-                case 'ArrowDown':
-                    playerDrop();
-                    break;
-                case 'ArrowUp':
-                    playerRotate();
-                    break;
-                case ' ': // Spacebar
-                    event.preventDefault(); // Stop page from scrolling
-                    playerHardDrop();
-                    break;
+            try {
+                const motivation = await callGemini(systemPrompt, userQuery);
+                motivationText.textContent = motivation;
+            } catch (error) {
+                console.error("Gemini motivation error:", error);
+                motivationText.textContent = "You played great! Try again!";
             }
         });
 
+    }); // End DOMContentLoaded
     </script>
 </body>
 </html>
