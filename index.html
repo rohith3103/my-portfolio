@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rohith Reddy Bethi - Portfolio</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts (Inter) -->
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+    
+    <!-- Firebase Libraries -->
+    <script type="module">
+        // Import the functions you need from the SDKs you need
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, setDoc, query, where, orderBy, limit, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase & App Config ---
+        // These global variables are provided by the environment.
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId;
+        let tetrisLeaderboardUnsubscribe = null;
+        let currentPlayerName = "Player";
+        let isGameActive = false;
+        
+        // --- App Views & Modals ---
+        const portfolioView = document.getElementById('portfolio-view');
+        const gameView = document.getElementById('game-view');
+        const leaderboardView = document.getElementById('leaderboard-view');
+        const nameModal = document.getElementById('name-modal');
+        const gameOverModal = document.getElementById('game-over-modal');
+        const geminiHelperModal = document.getElementById('gemini-helper-modal');
+
+        // --- DOM Elements ---
+        const scoreElement = document.getElementById('game-score');
+        const levelElement = document.getElementById('game-level');
+        const linesElement = document.getElementById('game-lines');
+        const canvas = document.getElementById('tetris-canvas');
+        const context = canvas.getContext('2d');
+        const nextCanvas = document.getElementById('next-canvas');
+        const nextContext = nextCanvas.getContext('2d');
+        
+        // --- Navigation ---
+        
+        // Function to switch views
+        function showView(viewToShow) {
+            [portfolioView, gameView, leaderboardView].forEach(view => {
+                view.classList.add('hidden');
+            });
+            if (viewToShow) {
+                viewToShow.classList.remove('hidden');
+            }
+            window.scrollTo(0, 0); // Scroll to top on view change
+        }
+
+        // Home link
+        document.getElementById('home-link').addEventListener('click', (e) => {
+            e.preventDefault();
+            if (isGameActive) {
+                pauseGame();
+            }
+            showView(portfolioView);
+            document.getElementById('back-to-game-btn').classList.add('hidden');
+        });
+
+        // "Play Tetris" buttons
+        [document.getElementById('game-nav-btn'), document.getElementById('game-nav-btn-mobile'), document.getElementById('game-project-btn')].forEach(btn => {
+            btn.addEventListener('click', () => {
+                showView(portfolioView); // Stay on portfolio view
+                nameModal.classList.remove('hidden'); // Show name modal
+                if (document.getElementById('mobile-menu').classList.contains('hidden') === false) {
+                    document.getElementById('mobile-menu').classList.add('hidden');
+                }
+            });
+        });
+
+        // Name Form
+        document.getElementById('name-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            currentPlayerName = document.getElementById('player-name').value.trim();
+            if (currentPlayerName) {
+                nameModal.classList.add('hidden');
+                showView(gameView);
+                document.getElementById('player-name-display').textContent = currentPlayerName;
+                startGame();
+            }
+        });
+
+        // Cancel Game from Name Modal
+        document.getElementById('cancel-game-btn').addEventListener('click', () => {
+            nameModal.classList.add('hidden');
+        });
+
+        // Leaderboard buttons
+        document.getElementById('view-leaderboard-btn').addEventListener('click', () => {
+            if (isGameActive) {
+                pauseGame();
+            }
+            showView(leaderboardView);
+            document.getElementById('back-to-game-btn').classList.remove('hidden');
+            fetchLeaderboard();
+        });
+
+        document.getElementById('leaderboard-from-gameover-btn').addEventListener('click', () => {
+            gameOverModal.classList.add('hidden');
+            showView(leaderboardView);
+            document.getElementById('back-to-game-btn').classList.add('hidden'); // Can't go back to game
+            fetchLeaderboard();
+        });
+
+        // Back buttons
+        [document.getElementById('back-to-portfolio-btn'), document.getElementById('back-to-portfolio-btn-2')].forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (isGameActive) {
+                    pauseGame();
+                }
+                showView(portfolioView);
+                document.getElementById('back-to-game-btn').classList.add('hidden');
+            });
+        });
+        
+        document.getElementById('back-to-game-btn').addEventListener('click', () => {
+            showView(gameView);
+            // Don't auto-resume, let user do it
+        });
+
+        // Play Again
+        document.getElementById('play-again-btn').addEventListener('click', () => {
+            gameOverModal.classList.add('hidden');
+            startGame(); // This will reset and start the game
+        });
+        
+        // --- Firebase Init & Auth ---
+        async function initializeFirebase() {
+            try {
+                if (!firebaseConfig.apiKey) {
+                    console.log("Firebase config not found. Using anonymous auth for demo.");
+                    return;
+                }
+                
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Enable Firestore logging for debugging
+                // setLogLevel('debug');
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        // console.log("User is signed in with UID:", userId);
+                        // User is authenticated, now we can safely attach leaderboard listener
+                        attachLeaderboardListener();
+                    } else {
+                        userId = null;
+                        // console.log("User is signed out.");
+                        // Detach listener if user signs out
+                        if (tetrisLeaderboardUnsubscribe) {
+                            tetrisLeaderboardUnsubscribe();
+                            tetrisLeaderboardUnsubscribe = null;
+                        }
+                    }
+                });
+
+                // Sign in
+                if (initialAuthToken) {
+                    // console.log("Signing in with custom token...");
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // console.log("No custom token, signing in anonymously...");
+                    await signInAnonymously(auth);
+                }
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                // Handle error, maybe show a message to the user
+            }
+        }
+        
+        // Call initialization
+        initializeFirebase();
+
+        // --- Custom Styles ---
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #11182b; /* Dark Gray-900 */
+            color: #d1d5db; /* Light text (gray-300) */
+            overflow-x: hidden; /* Prevent horizontal scroll from animations */
+        }
+        @supports (font-variation-settings: normal) {
+            body { font-family: 'Inter var', sans-serif; }
+        }
+        /* Custom scrollbar with new theme */
+        ::-webkit-scrollbar {
+            width: 8px;
+            background: #1f2937; /* Gray 800 */
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #3b82f6; /* Blue 500 */
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #2563eb; /* Blue 600 */
+        }
+
+        /* For the project carousel */
+        .project-carousel {
+            display: flex;
+            overflow-x: auto;
+            scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none; /* Firefox */
+        }
+        .project-carousel::-webkit-scrollbar {
+            display: none; /* Safari/Chrome */
+        }
+        .project-carousel-item {
+            flex: 0 0 auto;
+            width: 90%;
+            scroll-snap-align: center;
+            margin-right: 1rem;
+        }
+        @media (min-width: 768px) {
+            .project-carousel-item {
+                width: 45%;
+            }
+        }
+        @media (min-width: 1024px) {
+            .project-carousel-item {
+                width: 30%;
+            }
+        }
+        
+        /* Typing cursor effect */
+        .typing-cursor {
+            border-right: .15em solid #3b82f6; /* Blue cursor */
+            white-space: nowrap;
+            overflow: hidden;
+            animation: typing 3.5s steps(40, end) infinite, blink-caret .75s step-end infinite;
+        }
+        @keyframes typing {
+            from { width: 0 }
+            to { width: 100% }
+        }
+        @keyframes blink-caret {
+            from, to { border-color: transparent }
+            50% { border-color: #3b82f6; }
+        }
+
+        /* Scroll-fade-in animation */
+        .fade-in-section {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+        }
+        .fade-in-section.is-visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        /* Tetris Canvas */
+        #tetris-canvas {
+            background: #171717; /* Dark gray background */
+            border-radius: 0.5rem;
+            border: 4px solid #374151; /* Gray 700 border */
+        }
+        
+        /* Loading Spinner for Gemini API calls */
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 5px solid #FFF;
+            border-bottom-color: #3b82f6; /* Blue */
+            border-radius: 50%;
+            display: inline-block;
+            box-sizing: border-box;
+            animation: rotation 1s linear infinite;
+        }
+        
+        /* Highlight selection text */
+        ::selection {
+            background-color: #3b82f6;
+            color: white;
+        }
+
+        /* --- Floating Initials Animation --- */
+        #floating-initials-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow: hidden;
+            z-index: 0; /* Behind content */
+            pointer-events: none; /* Container isn't clickable */
+        }
+        .floating-initial {
+            position: absolute;
+            font-size: 2rem;
+            font-weight: 800; /* Extra bold */
+            color: rgba(59, 130, 246, 0.05); /* Very faint blue (5%) */
+            user-select: none;
+            pointer-events: auto; /* Initials ARE clickable */
+            cursor: pointer;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            animation: float-anim 20s infinite linear alternate;
+        }
+        
+        .floating-initial.popping {
+            transform: scale(2) rotate(90deg);
+            opacity: 0;
+        }
+
+        @keyframes float-anim {
+            from {
+                transform: translate(var(--x-start, 0), var(--y-start, 0)) rotate(0deg);
+            }
+            to {
+                transform: translate(var(--x-end, 0), var(--y-end, 0)) rotate(360deg);
+            }
+        }
+
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- Container for floating initials -->
+    <div id="floating-initials-container"></div>
+
+    <!-- =========== Header & Navigation =========== -->
+    <header class="bg-gray-900/80 backdrop-blur-md fixed top-0 left-0 right-0 z-50 border-b border-gray-700">
+        <nav class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <a href="#" id="home-link" class="text-2xl font-bold text-white">
+                Rohith <span class="text-blue-500">Reddy</span>
+            </a>
+            <div class="hidden md:flex space-x-6">
+                <a href="#about" class="nav-link text-gray-300 hover:text-blue-400 transition-colors duration-300">About</a>
+                <a href="#skills" class="nav-link text-gray-300 hover:text-blue-400 transition-colors duration-300">Skills</a>
+                <a href="#projects" class="nav-link text-gray-300 hover:text-blue-400 transition-colors duration-300">Projects</a>
+                <a href="#contact" class="nav-link text-gray-300 hover:text-blue-400 transition-colors duration-300">Contact</a>
+                <button id="game-nav-btn" class="text-gray-300 hover:text-blue-400 transition-colors duration-300 font-medium">Play Tetris</button>
+            </div>
+            <a href="#contact" class="nav-link hidden md:block bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg shadow-md transition-all duration-300">
+                Hire Me
+            </a>
+            <!-- Mobile Menu Button -->
+            <button id="mobile-menu-btn" class="md:hidden text-gray-300 hover:text-white focus:outline-none">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path>
+                </svg>
+            </button>
+        </nav>
+        <!-- Mobile Menu (hidden by default) -->
+        <div id="mobile-menu" class="hidden md:hidden px-6 pb-4 space-y-2">
+            <a href="#about" class="nav-link block text-gray-300 hover:text-blue-400">About</a>
+            <a href="#skills" class="nav-link block text-gray-300 hover:text-blue-400">Skills</a>
+            <a href="#projects" class="nav-link block text-gray-300 hover:text-blue-400">Projects</a>
+            <a href="#contact" class="nav-link block text-gray-300 hover:text-blue-400">Contact</a>
+            <button id="game-nav-btn-mobile" class="block w-full text-left text-gray-300 hover:text-blue-400">Play Tetris</button>
+            <a href="#contact" class="nav-link block w-full text-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg mt-2">
+                Hire Me
+            </a>
+        </div>
+    </header>
+
+    <!-- =========== Main Portfolio View =========== -->
+    <div id="portfolio-view">
+        <main class="container mx-auto px-6 pt-24 md:pt-32">
+
+            <!-- Hero Section -->
+            <section id="hero" class="flex flex-col-reverse md:flex-row items-center justify-between min-h-[70vh] gap-8">
+                <div class="md:w-3/5 text-center md:text-left">
+                    <h1 class="text-4xl md:text-6xl font-extrabold text-white leading-tight mb-4">
+                        Hi, I'm <span class="text-blue-500">Rohith Reddy</span>
+                    </h1>
+                    <div class="text-2xl md:text-3xl font-semibold text-gray-300 mb-6 h-10">
+                        <span id="typing-text" class="typing-cursor"></span>
+                    </div>
+                    <p class="text-lg text-gray-400 mb-8 max-w-xl mx-auto md:mx-0">
+                        Software Engineer specializing in architecting and deploying robust, AI-driven applications. Strong foundation in Data Structures, Algorithms, and OOP using Python and Java.
+                    </p>
+                    <div class="flex justify-center md:justify-start space-x-4">
+                        <a href="#projects" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                            View My Work
+                        </a>
+                        <a href="https://linkedin.com/in/rohithreddy3103" target="_blank" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                            LinkedIn
+                        </a>
+                    </div>
+                </div>
+                <div class="md:w-2/5 flex justify-center">
+                    <img src="https://placehold.co/400x400/1f2937/3b82f6?text=RRB" 
+                         alt="Portrait of Rohith Reddy Bethi" 
+                         class="rounded-full w-64 h-64 md:w-96 md:h-96 object-cover border-8 border-gray-800 shadow-2xl"
+                         onerror="this.src='https.placehold.co/400x400/1f2937/3b82f6?text=RRB'; this.onerror=null;">
+                </div>
+            </section>
+
+            <!-- About Me Section -->
+            <section id="about" class="py-24 fade-in-section">
+                <div class="text-center mb-12">
+                    <h2 class="text-3xl md:text-4xl font-bold text-white">About <span class="text-blue-500">Me</span></h2>
+                    <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
+                </div>
+                <div class="flex flex-col md:flex-row items-start gap-12 bg-gray-800/60 p-8 md:p-12 rounded-2xl shadow-xl border border-gray-700">
+                    <div class="md:w-1/2 text-center md:text-left">
+                        <h3 class="text-2xl font-bold text-white mb-4">Who I Am</h3>
+                        <p class="text-gray-300 text-lg leading-relaxed mb-6">
+                            I'm a Software Engineer with a dual expertise in software engineering and machine learning. I thrive on building scalable, intelligent solutions to complex problems, with a strong background in backend frameworks like Flask and leading AI/ML frameworks like PyTorch and TensorFlow.
+                        </p>
+                    </div>
+                    <div class="md:w-1/2 w-full">
+                        <h3 class="text-2xl font-bold text-white mb-4 text-center md:text-left">Education</h3>
+                        <div class="bg-gray-900/50 p-6 rounded-lg border border-gray-700">
+                            <h4 class="text-xl font-semibold text-blue-400">Bachelor of Technology, CSE (Data Science)</h4>
+                            <p class="text-gray-300 font-medium mt-1">Anurag University, Hyderabad</p>
+                            <p class="text-gray-400 text-sm mt-1">Oct 2021 - Jul 2025</p>
+                            <p class="text-gray-400 text-sm mt-2">GPA: 7.23</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Skills Section -->
+            <section id="skills" class="py-24 fade-in-section">
+                <div class="text-center mb-16">
+                    <h2 class="text-3xl md:text-4xl font-bold text-white">My <span class="text-blue-500">Skills</span></h2>
+                    <p class="text-lg text-gray-400 mt-4 max-w-2xl mx-auto">Here are the core technologies I work with.</p>
+                    <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
+                </div>
+                
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6 max-w-6xl mx-auto">
+                    
+                    <!-- Skill Card: Python -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">Python</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: Java -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">Java</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: Flask -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">Flask</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: PyTorch -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">PyTorch</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: TensorFlow -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">TensorFlow</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: Generative AI -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">Generative AI</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: RAG -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">RAG</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: SQL -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">SQL</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: MongoDB -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">MongoDB</h3>
+                        </div>
+                    </div>
+                    <!-- Skill Card: Git -->
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl shadow-lg overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-blue-500/20 hover:border-blue-500/30">
+                        <div class="p-6 text-center">
+                            <h3 class="text-lg font-bold text-white">Git</h3>
+                        </div>
+                    </div>
+
+                </div> <!-- This closes the skills grid -->
+            </section> <!-- This closes the skills section -->
+
+            <!-- Projects Section -->
+            <section id="projects" class="py-24 fade-in-section">
+                <div class="text-center mb-16">
+                    <h2 class="text-3xl md:text-4xl font-bold text-white">My <span class="text-blue-500">Projects</span></h2>
+                    <p class="text-lg text-gray-400 mt-4 max-w-2xl mx-auto">Here are a few projects I've worked on recently.</p>
+                    <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
+                </div>
+                
+                <div class="relative">
+                    <div class="project-carousel px-4 py-4 -mx-4 flex overflow-x-auto gap-6 snap-x snap-mandatory">
+                        
+                        <!-- Project Card 1: Multimodal RAG System -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Multimodal+RAG" 
+                                     alt="Multimodal RAG System" class="w-full h-48 object-cover"
+                                     onerror="this.src='httpsias.placehold.co/600x400/1f2937/3b82f6?text=Multimodal+RAG'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">Multimodal RAG System</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">Architected a full-stack RAG system to query documents, images, and YouTube videos using Google Gemini.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Python</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Flask</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Gemini</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">ChromaDB</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Whisper</span>
+                                    </div>
+                                    <a href="https://github.com/rohith3103/coastal-seven-multimodal-project.git" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Project Card 2: Sign Language to Text -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Sign+Language+AI" 
+                                     alt="Sign Language to Text System" class="w-full h-48 object-cover"
+                                     onerror="this.src='https://placehold.co/600x400/1f2937/3b82f6?text=Sign+Language+AI'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">Sign Language to Text System</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">Designing a Python-based AI system with JavaScript frontend to translate sign language to text and voice.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Python</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">JavaScript</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Deep Learning</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Transformer</span>
+                                    </div>
+                                    <a href="#" target="_blank" class="text-gray-500 font-medium inline-flex items-center mt-auto cursor-not-allowed">GitHub Link (Private) &rarr;</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Project Card 2: DeepFake Detection -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=DeepFake+Detection" 
+                                     alt="DeepFake Detection System" class="w-full h-48 object-cover"
+                                     onerror="this.src='https.placehold.co/600x400/1f2937/3b82f6?text=DeepFake+Detection'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">DeepFake Detection System</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">Built an AI model using PyTorch with Flask backend to detect deepfakes in video, image, and audio.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">PyTorch</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Flask</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Deep Learning</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">CNN</span>
+                                    </div>
+                                    <a href="https://github.com/rohith3103/DeepFake" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Project Card 3: AI-Powered Medical Imaging -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Medical+Imaging+AI" 
+                                     alt="AI Medical Imaging" class="w-full h-48 object-cover"
+                                     onerror="this.src='httpsias.placehold.co/600x400/1f2937/3b82f6?text=Medical+Imaging+AI'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">AI-Powered Medical Imaging</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">Contributed to CNN-based diagnostic model (93.5% accuracy) by preprocessing medical images and validating performance.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Python</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">CNN</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Data Preprocessing</span>
+                                    </div>
+                                    <a href="#" class="text-gray-500 font-medium inline-flex items-center mt-auto cursor-not-allowed">GitHub Link (Private) &rarr;</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Project Card 3: E-commerce API -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=E-Commerce+API" 
+                                     alt="E-commerce API" class="w-full h-48 object-cover"
+                                     onerror="this.src='https.placehold.co/600x400/1f2937/3b82f6?text=E-Commerce+API'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">E-commerce Product & Order API</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">Scalable backend REST API service built with Java and Spring Boot to manage product inventory and user orders, using MongoDB.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Java</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Spring Boot</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">MongoDB</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">REST API</span>
+                                    </div>
+                                    <a href="https://github.com/rohith3103/flipkart-api" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">View on GitHub &rarr;</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Project Card 4: My Tetris Game -->
+                        <div class="project-carousel-item w-full md:w-1/2 lg:w-1/3">
+                            <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-blue-500/20 hover:border-blue-500/30 h-full flex flex-col">
+                                <img src="https://placehold.co/600x400/1f2937/3b82f6?text=Tetris+Game" 
+                                     alt="Tetris Game Screenshot" class="w-full h-48 object-cover"
+                                     onerror="this.src='https.placehold.co/600x400/1f2937/3b82f6?text=Tetris+Game'; this.onerror=null;">
+                                <div class="p-6 flex flex-col flex-grow">
+                                    <h3 class="text-xl font-bold text-white mb-2">My Tetris Game</h3>
+                                    <p class="text-gray-400 mb-4 flex-grow">The very game on this site! Built with plain JavaScript, HTML Canvas, and a real-time Firestore leaderboard.</p>
+                                    <div class="flex flex-wrap gap-2 mb-4">
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">JavaScript</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">HTML Canvas</span>
+                                        <span class="bg-gray-700 text-blue-300 text-xs font-semibold px-2.5 py-0.5 rounded-full">Firestore</span>
+                                    </div>
+                                    <button id="game-project-btn" class="text-blue-400 hover:text-blue-300 font-medium inline-flex items-center mt-auto">Play Game &rarr;</button>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </section>
+
+            <!-- Contact Section -->
+            <section id="contact" class="py-24 fade-in-section">
+                <div class="text-center mb-12">
+                    <h2 class="text-3xl md:text-4xl font-bold text-white">Get In <span class="text-blue-500">Touch</span></h2>
+                    <p class="text-lg text-gray-400 mt-4 max-w-2xl mx-auto">I'm currently open to new opportunities. Feel free to send me a message.</p>
+                    <div class="h-1 w-20 bg-blue-500 mx-auto mt-2 rounded"></div>
+                </div>
+                
+                <div class="max-w-3xl mx-auto bg-gray-800/60 p-8 rounded-2xl shadow-xl border border-gray-700">
+                    <form id="contact-form">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            <div>
+                                <label for="name" class="block text-sm font-medium text-gray-300 mb-2">Your Name</label>
+                                <input type="text" id="name" name="name" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                            </div>
+                            <div>
+                                <label for="email" class="block text-sm font-medium text-gray-300 mb-2">Your Email</label>
+                                <input type="email" id="email" name="email" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                            </div>
+                        </div>
+                        <div class="mb-6">
+                            <div class="flex justify-between items-center mb-2">
+                                <label for="message" class="block text-sm font-medium text-gray-300">Message</label>
+                                <button type="button" id="gemini-helper-btn" class="text-xs text-blue-400 hover:text-blue-300 font-semibold">✨ Help Me Write</button>
+                            </div>
+                            <textarea id="message" name="message" rows="5" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Hi Rohith, I'd like to connect about..." required></textarea>
+                        </div>
+                        <div class="text-center">
+                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                                Send Message
+                            </button>
+                        </div>
+                    </form>
+                    <!-- Message area for form submission -->
+                    <div id="form-message" class="mt-6 text-center text-lg"></div>
+                </div>
+            </section>
+
+        </main>
+
+        <!-- Footer -->
+        <footer class="bg-gray-900 border-t border-gray-700 mt-24">
+            <div class="container mx-auto px-6 py-8 text-center text-gray-400">
+                <p>&copy; <span id="current-year"></span> Rohith Reddy Bethi. All rights reserved.</p>
+                <p class="text-sm mt-1">Contact: <a href="mailto:rohithreddy3103@gmail.com" class="text-blue-400 hover:underline">rohithreddy3103@gmail.com</a></p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- =========== Name Entry Modal =========== -->
+    <div id="name-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-800 border border-gray-700 p-8 rounded-2xl shadow-xl w-full max-w-sm">
+            <h2 class="text-2xl font-bold text-white text-center mb-6">Welcome to <span class="text-blue-500">Tetris</span></h2>
+            <form id="name-form">
+                <label for="player-name" class="block text-sm font-medium text-gray-300 mb-2">Enter Your Name:</label>
+                <input type="text" id="player-name" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                <button type="submit" class="mt-6 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                    Start Game
+                </button>
+                <button type="button" id="cancel-game-btn" class="mt-3 w-full bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                    Cancel
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- =========== Gemini Contact Helper Modal =========== -->
+    <div id="gemini-helper-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-800 border border-gray-700 p-8 rounded-2xl shadow-xl w-full max-w-sm">
+            <h2 class="text-xl font-bold text-white text-center mb-4">✨ Message Helper</h2>
+            <p class="text-gray-400 text-center text-sm mb-6">Enter a few keywords, and Gemini will draft a message for you.</p>
+            <form id="gemini-helper-form">
+                <label for="gemini-keywords" class="block text-sm font-medium text-gray-300 mb-2">Keywords (e.g., "job, AI, available")</label>
+                <input type="text" id="gemini-keywords" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                <button type="submit" id="generate-draft-btn" class="mt-6 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                    Generate Draft
+                </button>
+                <button type="button" id="cancel-gemini-btn" class="mt-3 w-full bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                    Cancel
+                </button>
+            </form>
+            <div id="gemini-loading" class="hidden mt-6 text-center">
+                <div class="spinner mx-auto"></div>
+                <p class="text-gray-400 mt-2">Generating...</p>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- =========== Game View =========== -->
+    <div id="game-view" class="hidden pt-24 min-h-screen">
+        <div class="container mx-auto px-4 text-center">
+            <div class="flex justify-between items-center mb-4">
+                <button id="back-to-portfolio-btn" class="bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                    &larr; Back to Portfolio
+                </button>
+                <button id="view-leaderboard-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                    Leaderboard
+                </button>
+            </div>
+
+            <div class="flex flex-col md:flex-row justify-center items-start gap-8">
+                <!-- Game Info -->
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-6 w-full md:w-64 text-left">
+                    <h3 class="text-2xl font-bold text-white mb-4">Stats</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <span class="text-gray-400">Player:</span>
+                            <span id="player-name-display" class="text-blue-400 font-bold text-lg ml-2 truncate">...</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400">Score:</span>
+                            <span id="game-score" class="text-blue-500 font-bold text-xl ml-2">0</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400">Level:</span>
+                            <span id="game-level" class="text-blue-500 font-bold text-xl ml-2">1</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400">Lines:</span>
+                            <span id="game-lines" class="text-blue-500 font-bold text-xl ml-2">0</span>
+                        </div>
+                    </div>
+                    <div class="mt-6">
+                        <h4 class="text-xl font-bold text-white mb-2">Next</h4>
+                        <canvas id="next-canvas" width="160" height="160" class="bg-gray-700 rounded-lg"></canvas>
+                    </div>
+
+                    <!-- Game Controls -->
+                    <div class="mt-6">
+                        <h4 class="text-xl font-bold text-white mb-4">Controls</h4>
+                        <ul class="space-y-3 text-sm">
+                            <li class="flex items-center justify-between">
+                                <span class="text-gray-300">Move Left/Right:</span>
+                                <span class="bg-gray-700 text-blue-300 font-mono px-2 py-0.5 rounded-md">&larr; &rarr;</span>
+                            </li>
+                            <li class="flex items-center justify-between">
+                                <span class="text-gray-300">Soft Drop:</span>
+                                <span class="bg-gray-700 text-blue-300 font-mono px-2 py-0.5 rounded-md">&darr;</span>
+                            </li>
+                            <li class="flex items-center justify-between">
+                                <span class="text-gray-300">Rotate:</span>
+                                <span class="bg-gray-700 text-blue-300 font-mono px-2 py-0.5 rounded-md">&uarr;</span>
+                            </li>
+                            <li class="flex items-center justify-between">
+                                <span class="text-gray-300">Hard Drop:</span>
+                                <span class="bg-gray-700 text-blue-300 font-mono px-2 py-0.5 rounded-md">Space</span>
+                            </li>
+                            <li class="flex items-center justify-between">
+                                <span class="text-gray-300">Pause:</span>
+                                <span class="bg-gray-700 text-blue-300 font-mono px-2 py-0.5 rounded-md">P</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Main Game Canvas -->
+                <div class="relative">
+                    <canvas id="tetris-canvas" width="300" height="600"></canvas>
+                    <div id="pause-overlay" class="hidden absolute inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center rounded-lg">
+                        <h2 class="text-4xl font-bold text-white">Paused</h2>
+                    </div>
+                </div>
+
+                <!-- Game Over Modal -->
+                <div id="game-over-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div class="bg-gray-800 border border-gray-700 p-8 rounded-2xl shadow-xl w-full max-w-sm text-center">
+                        <h2 class="text-4xl font-bold text-red-500 mb-4">Game Over</h2>
+                        <p class="text-lg text-white mb-2">Player: <span id="final-player-name" class="font-semibold text-blue-400"></span></p>
+                        <p class="text-xl text-white mb-6">Final Score: <span id="final-score" class="font-bold text-blue-400"></span></p>
+                        
+                        <!-- Gemini Motivation Area -->
+                        <div id="motivation-area" class="my-4 p-3 bg-gray-700 rounded-lg min-h-[60px] flex items-center justify-center hidden">
+                            <p id="motivation-text" class="text-gray-300 italic"></p>
+                            <div id="motivation-loading" class="hidden">
+                                <div class="spinner mx-auto" style="width: 32px; height: 32px; border-width: 3px;"></div>
+                            </div>
+                        </div>
+                        
+                        <button id="get-motivation-btn" class="w-full bg-blue-600/50 hover:bg-blue-600 text-white font-medium py-2 px-6 rounded-lg shadow-lg transition-all duration-300 text-sm mb-4">
+                            ✨ Get Motivation
+                        </button>
+                        
+                        <button id="play-again-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 text-lg">
+                            Play Again
+                        </button>
+                        <button id="leaderboard-from-gameover-btn" class="mt-3 w-full bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                            View Leaderboard
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- =========== Leaderboard View =========== -->
+    <div id="leaderboard-view" class="hidden pt-24 min-h-screen">
+        <div class="container mx-auto px-4">
+            <div class="flex justify-between items-center mb-6">
+                <button id="back-to-portfolio-btn-2" class="bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300">
+                    &larr; Back to Portfolio
+                </button>
+                <button id="back-to-game-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg shadow-lg transition-all duration-300 hidden">
+                    &larr; Back to Game
+                </button>
+            </div>
+            
+            <div class="max-w-3xl mx-auto bg-gray-800/60 p-8 rounded-2xl shadow-xl border border-gray-700">
+                <h2 class="text-3xl md:text-4xl font-bold text-white text-center mb-8">Tetris <span class="text-blue-500">Leaderboard</span></h2>
+                
+                <!-- Top 3 -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8 text-center">
+                    <!-- 2nd Place -->
+                    <div id="leader-2" class="bg-gray-700 p-6 rounded-lg border-2 border-gray-500 relative pt-10 order-2">
+                        <span class="absolute top-2 left-1/2 -translate-x-1/2 text-4xl font-bold text-gray-400">2</span>
+                        <div class="text-xl font-bold text-white truncate">...</div>
+                        <div class="text-lg text-blue-400">...</div>
+                    </div>
+                    <!-- 1st Place -->
+                    <div id="leader-1" class="bg-gray-700 p-6 rounded-lg border-2 border-yellow-500 relative pt-10 order-1 md:order-2 scale-110">
+                        <span class="absolute top-2 left-1/2 -translate-x-1/2 text-5xl font-bold text-yellow-400">1</span>
+                        <div class="text-2xl font-bold text-white truncate">...</div>
+                        <div class="text-xl text-blue-400">...</div>
+                    </div>
+                    <!-- 3rd Place -->
+                    <div id="leader-3" class="bg-gray-700 p-6 rounded-lg border-2 border-amber-700 relative pt-10 order-3">
+                        <span class="absolute top-2 left-1/2 -translate-x-1/2 text-4xl font-bold text-amber-600">3</span>
+                        <div class="text-xl font-bold text-white truncate">...</div>
+                        <div class="text-lg text-blue-400">...</div>
+                    </div>
+                </div>
+
+                <!-- Full List -->
+                <div id="leaderboard-list-loading" class="text-center">
+                    <div class="spinner mx-auto"></div>
+                </div>
+                <ul id="leaderboard-list" class="space-y-3">
+                    <!-- Ranks 4-10 will be dynamically inserted here -->
+                </ul>
+            </div>
+        </div>
+    </div>
+
+
+    <script type_BROKEN="module">
+    // This is intentionally broken to prevent execution in the <head>
+    // All JS logic is moved into the main <script type="module"> block above.
+    </script>
+    
+    <script>
+    // --- Non-Module, Standard JS ---
+
+    document.addEventListener('DOMContentLoaded', () => {
+        
+        // --- Mobile Menu Toggle ---
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        const mobileMenu = document.getElementById('mobile-menu');
+        mobileMenuBtn.addEventListener('click', () => {
+            mobileMenu.classList.toggle('hidden');
+        });
+
+        // Close mobile menu when a nav link is clicked
+        document.querySelectorAll('#mobile-menu .nav-link, #game-nav-btn-mobile').forEach(link => {
+            link.addEventListener('click', () => {
+                mobileMenu.classList.add('hidden');
+            });
+        });
+
+        // --- Typing Animation ---
+        const typingTextElement = document.getElementById('typing-text');
+        if (typingTextElement) {
+            const roles = ["Software Engineer", "AI & ML Developer", "Data Scientist", "Backend Developer"];
+            let roleIndex = 0;
+            let charIndex = 0;
+            let isDeleting = false;
+            
+            function type() {
+                const currentRole = roles[roleIndex];
+                if (isDeleting) {
+                    // Deleting
+                    typingTextElement.textContent = currentRole.substring(0, charIndex - 1);
+                    charIndex--;
+                    if (charIndex === 0) {
+                        isDeleting = false;
+                        roleIndex = (roleIndex + 1) % roles.length;
+                        setTimeout(type, 500); // Pause before typing new role
+                    } else {
+                        setTimeout(type, 50); // Deleting speed
+                    }
+                } else {
+                    // Typing
+                    typingTextElement.textContent = currentRole.substring(0, charIndex + 1);
+                    charIndex++;
+                    if (charIndex === currentRole.length) {
+                        isDeleting = true;
+                        setTimeout(type, 2000); // Pause at end of word
+                    } else {
+                        setTimeout(type, 100); // Typing speed
+                    }
+                }
+            }
+            type();
+        }
+
+        // --- Smooth Scrolling for Nav Links ---
+        document.querySelectorAll('a.nav-link[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const targetId = this.getAttribute('href');
+                const targetElement = document.querySelector(targetId);
+                if (targetElement) {
+                    targetElement.scrollIntoView({
+                        behavior: 'smooth'
+                    });
+                }
+            });
+        });
+
+        // --- Animate sections on scroll ---
+        const fadeSections = document.querySelectorAll('.fade-in-section');
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('is-visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.1 });
+
+        fadeSections.forEach(section => {
+            observer.observe(section);
+        });
+
+        // --- Footer Current Year ---
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+
+        // --- Contact Form (Demo) ---
+        const contactForm = document.getElementById('contact-form');
+        const formMessage = document.getElementById('form-message');
+        contactForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const name = this.name.value;
+            formMessage.textContent = `Thank you, ${name}! (This is a demo, no data was sent.)`;
+            formMessage.className = 'text-blue-400 mt-6 text-center text-lg';
+            this.reset();
+            setTimeout(() => { formMessage.textContent = ''; }, 5000);
+        });
+
+        // --- Floating Initials Logic ---
+        const floatingContainer = document.getElementById('floating-initials-container');
+        const numInitials = 15;
+
+        function createFloatingInitial() {
+            if (!floatingContainer) return;
+            const initial = document.createElement('div');
+            initial.className = 'floating-initial';
+            initial.textContent = 'RRB';
+
+            // Set random positions for animation
+            const setRandomVars = () => {
+                initial.style.setProperty('--x-start', `${Math.random() * 80}vw`);
+                initial.style.setProperty('--y-start', `${Math.random() * 80}vh`);
+                initial.style.setProperty('--x-end', `${Math.random() * 80}vw`);
+                initial.style.setProperty('--y-end', `${Math.random() * 80}vh`);
+                initial.style.animationDuration = `${Math.random() * 15 + 15}s`; // 15-30 seconds
+                initial.style.animationDelay = `-${Math.random() * 15}s`; // Start mid-animation
+            };
+            setRandomVars();
+            
+            // Pop and regenerate
+            initial.addEventListener('click', () => {
+                if (initial.classList.contains('popping')) return; // Don't pop twice
+                
+                initial.classList.add('popping');
+                
+                // After pop animation, remove and recreate
+                setTimeout(() => {
+                    if (floatingContainer.contains(initial)) {
+                        floatingContainer.removeChild(initial);
+                    }
+                    createFloatingInitial(); // Add a new one
+                }, 300); // 300ms transition
+            });
+
+            floatingContainer.appendChild(initial);
+        }
+
+        for (let i = 0; i < numInitials; i++) {
+            createFloatingInitial();
+        }
+
+        // --- Leaderboard Logic ---
+        // Moved to the main <script type="module"> block to access 'db'
+        
+        // --- Gemini Helper Modal ---
+        const geminiHelperBtn = document.getElementById('gemini-helper-btn');
+        const geminiHelperModal = document.getElementById('gemini-helper-modal');
+        const cancelGeminiBtn = document.getElementById('cancel-gemini-btn');
+        const geminiHelperForm = document.getElementById('gemini-helper-form');
+        const generateDraftBtn = document.getElementById('generate-draft-btn');
+        const geminiLoading = document.getElementById('gemini-loading');
+        const messageTextarea = document.getElementById('message');
+
+        geminiHelperBtn.addEventListener('click', () => {
+            geminiHelperModal.classList.remove('hidden');
+        });
+        cancelGeminiBtn.addEventListener('click', () => {
+            geminiHelperModal.classList.add('hidden');
+        });
+
+        geminiHelperForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const keywords = document.getElementById('gemini-keywords').value;
+            if (!keywords) return;
+
+            generateDraftBtn.classList.add('hidden');
+            geminiLoading.classList.remove('hidden');
+
+            const prompt = `You are a professional assistant helping someone write a contact message for a portfolio website. The user's name is Rohith Reddy. The recipient is also Rohith Reddy (the owner of the portfolio).
+            Based on the following keywords, write a polite and professional message (about 3-4 sentences long) that the user can send.
+            Keywords: "${keywords}"
+            
+            Start the message with "Hi Rohith," and sign off with the user's name (which they will fill in). Just provide the message body.`;
+
+            try {
+                const generatedText = await callGemini(prompt, false); // No search needed
+                messageTextarea.value = generatedText;
+                geminiHelperModal.classList.add('hidden');
+            } catch (error) {
+                messageTextarea.value = "Sorry, I couldn't generate a draft. Please try again.\n\nKeywords: " + keywords;
+            } finally {
+                generateDraftBtn.classList.remove('hidden');
+                geminiLoading.classList.add('hidden');
+            }
+        });
+
+        // --- Game Over Motivation Button ---
+        const getMotivationBtn = document.getElementById('get-motivation-btn');
+        const motivationArea = document.getElementById('motivation-area');
+        const motivationText = document.getElementById('motivation-text');
+        const motivationLoading = document.getElementById('motivation-loading');
+
+        getMotivationBtn.addEventListener('click', async () => {
+            const finalScore = document.getElementById('final-score').textContent;
+            motivationArea.classList.remove('hidden');
+            motivationLoading.classList.remove('hidden');
+            getMotivationBtn.classList.add('hidden');
+            motivationText.textContent = '';
+            
+            const prompt = `I just scored ${finalScore} in Tetris. Give me a short (one sentence), funny, and slightly snarky motivational message.`;
+
+            try {
+                const motivation = await callGemini(prompt, false);
+                motivationText.textContent = motivation;
+            } catch (error) {
+                motivationText.textContent = "You're doing great! (Gemini is busy, but I'm not!)";
+            } finally {
+                motivationLoading.classList.add('hidden');
+            }
+        });
+
+
+    }); // End of DOMContentLoaded
+
+    // --- Gemini API Call Function ---
+    async function callGemini(prompt, useSearch) {
+        const apiKey = ""; // API key is handled by the environment
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        
+        const systemPrompt = "You are a helpful assistant integrated into a portfolio website. Be concise and friendly.";
+        
+        const payload = {
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: {
+                parts: [{ text: systemPrompt }]
+            },
+        };
+
+        if (useSearch) {
+            payload.tools = [{ "google_search": {} }];
+        }
+
+        // Add retry logic
+        let response;
+        for (let i = 0; i < 3; i++) { // Retry up to 3 times
+            try {
+                response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    if (result.candidates && result.candidates[0].content?.parts?.[0]?.text) {
+                        return result.candidates[0].content.parts[0].text;
+                    } else {
+                        throw new Error("Invalid API response structure");
+                    }
+                } else {
+                    throw new Error(`Fetch failed with status: ${response.status}`);
+                }
+            } catch (error) {
+                console.warn(`Gemini API call attempt ${i + 1} failed:`, error.message);
+                if (i === 2) { // Last retry failed
+                    console.error("Gemini API call failed permanently:", error);
+                    throw new Error("Failed to get response from Gemini.");
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Exponential backoff
+            }
+        }
+    }
+
+
+    // --- Firestore Leaderboard Functions ---
+    // These need to be in the module script, so I'll move them
+    // For now, these stubs are here, but the real logic is in the <script type="module">
+    function attachLeaderboardListener() {
+        // console.log("Stub: attachLeaderboardListener");
+        // This function's real implementation is in the module script
+        // to get access to 'db', 'onSnapshot', etc.
+    }
+    
+    function fetchLeaderboard() {
+        // console.log("Stub: fetchLeaderboard");
+        // This function's real implementation is in the module script
+    }
+    
+    async function saveScoreToLeaderboard(name, score) {
+        // console.log("Stub: saveScoreToLeaderboard");
+        // This function's real implementation is in the module script
+    }
+
+    </script>
+    
+    <!-- Main Module Script (contains all Firebase & Game Logic) -->
+    <script type="module">
+        // Re-import shared functions
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, setDoc, query, where, orderBy, limit, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase & App Config ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId;
+        let tetrisLeaderboardUnsubscribe = null;
+        let currentPlayerName = "Player";
+        let isGameActive = false;
+        
+        // --- App Views & Modals ---
+        const portfolioView = document.getElementById('portfolio-view');
+        const gameView = document.getElementById('game-view');
+        const leaderboardView = document.getElementById('leaderboard-view');
+        const nameModal = document.getElementById('name-modal');
+        const gameOverModal = document.getElementById('game-over-modal');
+        const pauseOverlay = document.getElementById('pause-overlay');
+        
+        // --- DOM Elements ---
+        const scoreElement = document.getElementById('game-score');
+        const levelElement = document.getElementById('game-level');
+        const linesElement = document.getElementById('game-lines');
+        const canvas = document.getElementById('tetris-canvas');
+        const context = canvas.getContext('2d');
+        const nextCanvas = document.getElementById('next-canvas');
+        const nextContext = nextCanvas.getContext('2d');
+
+        // --- Navigation (Re-linking from module) ---
+        
+        function showView(viewToShow) {
+            [portfolioView, gameView, leaderboardView].forEach(view => {
+                view.classList.add('hidden');
+            });
+            if (viewToShow) {
+                viewToShow.classList.remove('hidden');
+            }
+            window.scrollTo(0, 0);
+        }
+
+        document.getElementById('home-link').addEventListener('click', (e) => {
+            e.preventDefault();
+            if (isGameActive) pauseGame();
+            showView(portfolioView);
+            document.getElementById('back-to-game-btn').classList.add('hidden');
+        });
+
+        [document.getElementById('game-nav-btn'), document.getElementById('game-nav-btn-mobile'), document.getElementById('game-project-btn')].forEach(btn => {
+            btn.addEventListener('click', () => {
+                showView(portfolioView);
+                nameModal.classList.remove('hidden');
+                if (document.getElementById('mobile-menu').classList.contains('hidden') === false) {
+                    document.getElementById('mobile-menu').classList.add('hidden');
+                }
+            });
+        });
+
+        document.getElementById('name-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            currentPlayerName = document.getElementById('player-name').value.trim() || "Anonymous";
+            nameModal.classList.add('hidden');
+            showView(gameView);
+            document.getElementById('player-name-display').textContent = currentPlayerName;
+            startGame();
+        });
+
+        document.getElementById('cancel-game-btn').addEventListener('click', () => {
+            nameModal.classList.add('hidden');
+        });
+
+        document.getElementById('view-leaderboard-btn').addEventListener('click', () => {
+            if (isGameActive) pauseGame();
+            showView(leaderboardView);
+            document.getElementById('back-to-game-btn').classList.remove('hidden');
+            fetchLeaderboard(); // Manually trigger fetch
+        });
+
+        document.getElementById('leaderboard-from-gameover-btn').addEventListener('click', () => {
+            gameOverModal.classList.add('hidden');
+            showView(leaderboardView);
+            document.getElementById('back-to-game-btn').classList.add('hidden');
+            fetchLeaderboard(); // Manually trigger fetch
+        });
+
+        [document.getElementById('back-to-portfolio-btn'), document.getElementById('back-to-portfolio-btn-2')].forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (isGameActive) pauseGame();
+                showView(portfolioView);
+                document.getElementById('back-to-game-btn').classList.add('hidden');
+            });
+        });
+        
+        document.getElementById('back-to-game-btn').addEventListener('click', () => {
+            showView(gameView);
+            // Don't resume automatically
+        });
+
+        document.getElementById('play-again-btn').addEventListener('click', () => {
+            gameOverModal.classList.add('hidden');
+            startGame();
+        });
+
+        // --- Firebase Init & Auth (Module Scope) ---
+        async function initializeFirebase() {
+            try {
+                if (!firebaseConfig.apiKey) {
+                    console.log("Firebase config not found. Leaderboard will be disabled.");
+                    return;
+                }
+                
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // setLogLevel('debug');
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        // console.log("User is signed in (Module):", userId);
+                        attachLeaderboardListener(); // Attach listener *after* auth
+                    } else {
+                        userId = null;
+                        // console.log("User is signed out (Module).");
+                        if (tetrisLeaderboardUnsubscribe) {
+                            tetrisLeaderboardUnsubscribe();
+                            tetrisLeaderboardUnsubscribe = null;
+                        }
+                    }
+                });
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+            } catch (error) {
+                console.error("Firebase Initialization Error (Module):", error);
+            }
+        }
+        
+        initializeFirebase(); // Call from module
+        
+        // --- Firestore Leaderboard Functions (Module Scope) ---
+        
+        function attachLeaderboardListener() {
+            if (!db || !userId) {
+                // console.log("DB not ready or user not auth'd, skipping listener.");
+                return;
+            }
+            if (tetrisLeaderboardUnsubscribe) {
+                // console.log("Listener already attached.");
+                return; // Already listening
+            }
+
+            // console.log("Attaching leaderboard listener...");
+            const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
+            const q = query(collection(db, leaderboardCollectionPath), orderBy("score", "desc"), limit(10));
+            
+            tetrisLeaderboardUnsubscribe = onSnapshot(q, (snapshot) => {
+                // console.log("Leaderboard snapshot received");
+                document.getElementById('leaderboard-list-loading').classList.add('hidden');
+                const scores = [];
+                snapshot.forEach(doc => {
+                    scores.push(doc.data());
+                });
+                updateLeaderboardUI(scores);
+            }, (error) => {
+                console.error("Error getting leaderboard:", error);
+                document.getElementById('leaderboard-list-loading').classList.add('hidden');
+            });
+        }
+        
+        // This function is called by the snapshot listener
+        function updateLeaderboardUI(scores) {
+            const list = document.getElementById('leaderboard-list');
+            list.innerHTML = ''; // Clear old list
+
+            // Top 3
+            const top3Ids = ['leader-1', 'leader-2', 'leader-3'];
+            top3Ids.forEach((id, index) => {
+                const el = document.getElementById(id);
+                const scoreData = scores[index];
+                if (scoreData) {
+                    el.querySelector('div:nth-of-type(1)').textContent = scoreData.name;
+                    el.querySelector('div:nth-of-type(2)').textContent = scoreData.score;
+                } else {
+                    el.querySelector('div:nth-of-type(1)').textContent = '...';
+                    el.querySelector('div:nth-of-type(2)').textContent = '...';
+                }
+            });
+
+            // Ranks 4-10
+            if (scores.length > 3) {
+                scores.slice(3).forEach((scoreData, index) => {
+                    const li = document.createElement('li');
+                    li.className = 'flex justify-between items-center bg-gray-700 p-4 rounded-lg';
+                    li.innerHTML = `
+                        <div class="flex items-center">
+                            <span class="text-gray-400 font-bold w-6 text-left">${index + 4}</span>
+                            <span class="text-white font-semibold ml-4 truncate">${scoreData.name}</span>
+                        </div>
+                        <span class="text-blue-400 font-bold">${scoreData.score}</span>
+                    `;
+                    list.appendChild(li);
+                });
+            }
+        }
+        
+        // This is a manual fetch, e.g., when opening leaderboard
+        async function fetchLeaderboard() {
+            if (!db || !userId) {
+                // console.log("DB not ready or user not auth'd, cannot fetch.");
+                attachLeaderboardListener(); // Try to attach listener if not already
+                return;
+            }
+            // console.log("Manually fetching leaderboard...");
+            document.getElementById('leaderboard-list-loading').classList.remove('hidden');
+            
+            const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
+            const q = query(collection(db, leaderboardCollectionPath), orderBy("score", "desc"), limit(10));
+            
+            try {
+                const querySnapshot = await getDocs(q);
+                const scores = [];
+                querySnapshot.forEach(doc => {
+                    scores.push(doc.data());
+                });
+                updateLeaderboardUI(scores);
+            } catch (error) {
+                console.error("Error manually fetching leaderboard:", error);
+            } finally {
+                document.getElementById('leaderboard-list-loading').classList.add('hidden');
+            }
+        }
+        
+        async function saveScoreToLeaderboard(name, score) {
+            if (!db || !userId) {
+                console.warn("Firestore not initialized or user not authenticated. Score not saved.");
+                return;
+            }
+            if (!name || score === 0) {
+                console.warn("Invalid name or score zero. Score not saved.");
+                return;
+            }
+
+            try {
+                // We use a public path for a shared leaderboard
+                const leaderboardCollectionPath = `/artifacts/${appId}/public/data/tetris_leaderboard`;
+                // Create a doc ID based on user and timestamp to prevent overwrites
+                const docId = `${userId}_${Date.now()}`;
+                const docRef = doc(db, leaderboardCollectionPath, docId);
+                
+                await setDoc(docRef, {
+                    name: name,
+                    score: score,
+                    timestamp: serverTimestamp(),
+                    userId: userId // Store who submitted
+                });
+                // console.log("Score saved successfully!");
+            } catch (error) {
+                console.error("Error saving score to leaderboard: ", error);
+            }
+        }
+        
+        
+        // --- Tetris Game Logic ---
+        
+        const COLS = 10;
+        const ROWS = 20;
+        const BLOCK_SIZE = 30; // 30px per block
+        
+        canvas.width = COLS * BLOCK_SIZE;
+        canvas.height = ROWS * BLOCK_SIZE;
+        context.scale(BLOCK_SIZE, BLOCK_SIZE);
+        
+        nextCanvas.width = 4 * (BLOCK_SIZE / 1.5);
+        nextCanvas.height = 4 * (BLOCK_SIZE / 1.5);
+        nextContext.scale(BLOCK_SIZE / 1.5, BLOCK_SIZE / 1.5); // Smaller blocks for preview
+
+        const COLORS = [
+            null,
+            '#0EA5E9', // Sky (I)
+            '#EAB308', // Yellow (O)
+            '#8B5CF6', // Purple (T)
+            '#22C55E', // Green (S)
+            '#EF4444', // Red (Z)
+            '#3B82F6', // Blue (J)
+            '#F97316'  // Orange (L)
+        ];
+
+        const TETROMINOS = {
+            'I': [[0, 0, 0, 0], [1, 1, 1, 1], [0, 0, 0, 0], [0, 0, 0, 0]],
+            'O': [[2, 2], [2, 2]],
+            'T': [[0, 3, 0], [3, 3, 3], [0, 0, 0]],
+            'S': [[0, 4, 4], [4, 4, 0], [0, 0, 0]],
+            'Z': [[5, 5, 0], [0, 5, 5], [0, 0, 0]],
+            'J': [[6, 0, 0], [6, 6, 6], [0, 0, 0]], // Corrected J
+            'L': [[0, 0, 7], [7, 7, 7], [0, 0, 0]]  // Corrected L
+        };
+
+        let board;
+        let player;
+        let nextPiece;
+        let gameReqId;
+        let gameTime;
+        let isPaused;
+
+        let score;
+        let lines;
+        let level;
+
+        const linePoints = [0, 40, 100, 300, 1200]; // 0, 1, 2, 3, 4 lines
+
+        function createBoard() {
+            return Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+        }
+
+        function getNewPiece() {
+            const pieces = 'IOTSZJL';
+            const type = pieces[pieces.length * Math.random() | 0];
+            const matrix = TETROMINOS[type];
+            return {
+                matrix: matrix,
+                pos: { x: Math.floor(COLS / 2) - Math.floor(matrix[0].length / 2), y: 0 },
+                type: type
+            };
+        }
+
+        function drawMatrix(matrix, offset, ctx) {
+            matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value !== 0) {
+                        ctx.fillStyle = COLORS[value];
+                        ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+                        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+                        ctx.lineWidth = 0.1;
+                        ctx.strokeRect(x + offset.x, y + offset.y, 1, 1);
+                    }
+                });
+            });
+        }
+
+        function drawNextPiece() {
+            nextContext.fillStyle = '#1f2937'; // bg-gray-800
+            nextContext.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+            
+            const matrix = nextPiece.matrix;
+            const offset = {
+                x: (4 - matrix[0].length) / 2,
+                y: (4 - matrix.length) / 2
+            };
+            drawMatrix(matrix, offset, nextContext);
+        }
+
+        function drawGame() {
+            context.fillStyle = '#171717'; // Dark gray bg
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            
+            drawMatrix(board, { x: 0, y: 0 }, context); // Draw frozen pieces
+            drawMatrix(player.matrix, player.pos, context); // Draw current piece
+        }
+
+        function merge(board, player) {
+            player.matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value !== 0) {
+                        board[y + player.pos.y][x + player.pos.x] = value;
+                    }
+                });
+            });
+        }
+
+        function collide(board, player) {
+            const [matrix, pos] = [player.matrix, player.pos];
+            for (let y = 0; y < matrix.length; y++) {
+                for (let x = 0; x < matrix[y].length; x++) {
+                    if (matrix[y][x] !== 0 &&
+                        (board[y + pos.y] && board[y + pos.y][x + pos.x]) !== 0) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function rotate(matrix, dir) {
+            const N = matrix.length;
+            const newMatrix = Array.from({ length: N }, () => Array(N).fill(0));
+            for (let y = 0; y < N; y++) {
+                for (let x = 0; x < N; x++) {
+                    if (dir > 0) { // Clockwise
+                        newMatrix[x][N - 1 - y] = matrix[y][x];
+                    } else { // Counter-clockwise (not used, but good to have)
+                        newMatrix[N - 1 - x][y] = matrix[y][x];
+                    }
+                }
+            }
+            return newMatrix;
+        }
+
+        function playerRotate() {
+            const pos = player.pos.x;
+            let offset = 1;
+            const rotated = rotate(player.matrix, 1);
+            
+            const newPlayer = { ...player, matrix: rotated };
+
+            while (collide(board, newPlayer)) {
+                newPlayer.pos.x += offset;
+                offset = -(offset + (offset > 0 ? 1 : -1));
+                if (offset > newPlayer.matrix[0].length) {
+                    // Can't rotate, so revert
+                    return;
+                }
+            }
+            player.matrix = newPlayer.matrix;
+            player.pos.x = newPlayer.pos.x;
+        }
+
+        function playerMove(dir) {
+            player.pos.x += dir;
+            if (collide(board, player)) {
+                player.pos.x -= dir; // Move back
+            }
+        }
+
+        function playerDrop() {
+            player.pos.y++;
+            if (collide(board, player)) {
+                player.pos.y--;
+                pieceLock();
+                return;
+            }
+            gameTime.dropCounter = 0;
+        }
+
+        function playerHardDrop() {
+            while (!collide(board, player)) {
+                player.pos.y++;
+            }
+            player.pos.y--; // Move back one
+            pieceLock();
+        }
+
+        function pieceLock() {
+            merge(board, player);
+            sweepLines();
+            playerReset();
+            updateScore();
+        }
+
+        function sweepLines() {
+            let rowCount = 0;
+            outer: for (let y = board.length - 1; y > 0; y--) {
+                for (let x = 0; x < board[y].length; x++) {
+                    if (board[y][x] === 0) {
+                        continue outer;
+                    }
+                }
+                
+                // Full line
+                const row = board.splice(y, 1)[0].fill(0);
+                board.unshift(row);
+                y++; // Check the same row again
+                rowCount++;
+            }
+            
+            if (rowCount > 0) {
+                score += linePoints[rowCount] * level;
+                lines += rowCount;
+                // Level up every 10 lines
+                if (lines >= level * 10) {
+                    level++;
+                    gameTime.dropInterval = 1000 / level; // Speed up
+                }
+            }
+        }
+
+        function playerReset() {
+            player = nextPiece;
+            nextPiece = getNewPiece();
+            
+            player.pos.x = (COLS / 2 | 0) - (player.matrix[0].length / 2 | 0);
+            player.pos.y = 0;
+            
+            if (collide(board, player)) {
+                // Game Over
+                gameOver();
+            }
+            
+            drawNextPiece();
+        }
+        
+        function updateScore() {
+            scoreElement.textContent = score;
+            linesElement.textContent = lines;
+            levelElement.textContent = level;
+        }
+
+        let lastTime = 0;
+        function update(time = 0) {
+            if (isPaused) return;
+
+            const deltaTime = time - lastTime;
+            lastTime = time;
+            
+            gameTime.dropCounter += deltaTime;
+            if (gameTime.dropCounter > gameTime.dropInterval) {
+                playerDrop();
+            }
+            
+            drawGame();
+            gameReqId = requestAnimationFrame(update);
+        }
+
+        function startGame() {
+            board = createBoard();
+            nextPiece = getNewPiece();
+            playerReset(); // This sets `player` and gets a new `nextPiece`
+            
+            score = 0;
+            lines = 0;
+            level = 1;
+            
+            gameTime = {
+                dropCounter: 0,
+                dropInterval: 1000 // 1 second per level
+            };
+            
+            isPaused = false;
+            isGameActive = true;
+            pauseOverlay.classList.add('hidden');
+            
+            updateScore();
+            
+            // Clear any old game loops
+            if (gameReqId) {
+                cancelAnimationFrame(gameReqId);
+            }
+            
+            // console.log("Starting game...");
+            update();
+        }
+        
+        function gameOver() {
+            // console.log("Game Over!");
+            isGameActive = false;
+            cancelAnimationFrame(gameReqId);
+            gameReqId = null;
+            
+            // Show Game Over Modal
+            document.getElementById('final-player-name').textContent = currentPlayerName;
+            document.getElementById('final-score').textContent = score;
+            gameOverModal.classList.remove('hidden');
+            
+            // Reset motivation button
+            document.getElementById('motivation-area').classList.add('hidden');
+            document.getElementById('motivation-text').textContent = '';
+            document.getElementById('get-motivation-btn').classList.remove('hidden');
+            
+            // Save score
+            saveScoreToLeaderboard(currentPlayerName, score);
+        }
+        
+        function pauseGame() {
+            if (!gameReqId) return; // Not running
+            
+            if (isPaused) {
+                // Resume
+                isPaused = false;
+                pauseOverlay.classList.add('hidden');
+                update(lastTime); // Restart update loop
+            } else {
+                // Pause
+                isPaused = true;
+                pauseOverlay.classList.remove('hidden');
+                cancelAnimationFrame(gameReqId);
+            }
+        }
+
+        // --- Keyboard Controls ---
+        document.addEventListener('keydown', event => {
+            if (!isGameActive) return;
+
+            if (event.key === 'p' || event.key === 'P') {
+                pauseGame();
+            }
+
+            if (isPaused) return;
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                    playerMove(-1);
+                    break;
+                case 'ArrowRight':
+                    playerMove(1);
+                    break;
+                case 'ArrowDown':
+                    playerDrop();
+                    break;
+                case 'ArrowUp':
+                    playerRotate();
+                    break;
+                case ' ': // Spacebar
+                    event.preventDefault(); // Stop page from scrolling
+                    playerHardDrop();
+                    break;
+            }
+        });
+
+    </script>
+</body>
+</html>
