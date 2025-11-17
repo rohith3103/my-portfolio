@@ -1040,13 +1040,60 @@
         // --- Contact Form ---
         const contactForm = document.getElementById('contact-form');
         const formMessage = document.getElementById('form-message');
+        
+        // !!! ======================================================= !!!
+        // !!!  YOUR FORMSPREE URL IS PASTED HERE                      !!!
+        // !!! ======================================================= !!!
+        const FORM_ENDPOINT = "https://formspree.io/f/xvgdlyzb"; 
+
         contactForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            const name = this.name.value;
-            formMessage.textContent = `Thank you, ${name}! (This is a demo, no data was sent.)`;
-            formMessage.className = 'text-blue-400 mt-6 text-center text-lg';
-            this.reset();
-            setTimeout(() => { formMessage.textContent = ''; }, 5000);
+            
+            if (!FORM_ENDPOINT || FORM_ENDPOINT === "YOUR_FORMSPREE_URL_GOES_HERE") {
+                formMessage.textContent = "Form is not configured. (Admin: Add Formspree URL in the code)";
+                formMessage.className = 'text-red-500 mt-6 text-center text-lg';
+                return;
+            }
+
+            const formData = new FormData(this);
+            const data = Object.fromEntries(formData.entries());
+            const submitButton = contactForm.querySelector('button[type="submit"]');
+            const originalBtnText = submitButton.innerHTML;
+
+            submitButton.innerHTML = '<div class="spinner w-6 h-6 border-2 border-white border-b-transparent mx-auto"></div>';
+            submitButton.disabled = true;
+            formMessage.textContent = '';
+
+            fetch(FORM_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => {
+                if (response.ok) {
+                    return response.json();
+                }
+                throw new Error('Network response was not ok.');
+            })
+            .then(data => {
+                const name = contactForm.name.value;
+                formMessage.textContent = `Thank you, ${name}! Your message has been sent.`;
+                formMessage.className = 'text-blue-400 mt-6 text-center text-lg';
+                contactForm.reset();
+            })
+            .catch(error => {
+                console.error('Form submission error:', error);
+                formMessage.textContent = "Sorry, there was an error sending your message. Please try again.";
+                formMessage.className = 'text-red-500 mt-6 text-center text-lg';
+            })
+            .finally(() => {
+                submitButton.innerHTML = originalBtnText;
+                submitButton.disabled = false;
+                setTimeout(() => { formMessage.textContent = ''; }, 5000);
+            });
         });
 
         // --- Floating Initials Logic ---
